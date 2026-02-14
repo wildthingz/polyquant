@@ -9,7 +9,6 @@ services:
       - POSTGRES_USER=polyquant_user
       - POSTGRES_PASSWORD=password123
       - POSTGRES_DB=polyquant
-      # Allow host connections (needed for some setups)
       - POSTGRES_HOST_AUTH_METHOD=md5
     ports:
       - "5432:5432"
@@ -27,21 +26,28 @@ services:
 
   # 2. IB Gateway (Headless)
   ib_gateway:
-    image: ghcr.io/gnzsnz/ib-gateway:latest
+    image: ghcr.io/gnzsnz/ib-gateway:stable
     container_name: polyquant_ibkr
     environment:
       - TWS_USERID=${IBKR_USERNAME}
       - TWS_PASSWORD=${IBKR_PASSWORD}
       - TRADING_MODE=${IBKR_TRADING_MODE:-paper}
       - VNC_SERVER_PASSWORD=password123
+      - IB_API_PORT=4002
+      - TWS_API_PORT=4002
+      - SOC_PORT=4002
+      # Try allowing standard Docker subnets
+      - IB_API_TRUSTED_IPS=127.0.0.1,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8
     ports:
       - "4002:4002"
       - "5900:5900"
+    volumes:
+      - ./config/ibkr/config.ini:/root/ibc/config.ini
     networks:
       - polyquant_net
     restart: unless-stopped
 
-  # 3. C++ Engine (Build & Run)
+  # 3. C++ Engine (Dev Mode via SSH)
   engine:
     build:
       context: .
@@ -49,6 +55,7 @@ services:
     container_name: polyquant_engine
     volumes:
       - .:/app
+      # Removed explicit .env mount as it is included in .:/app
     depends_on:
       db:
         condition: service_healthy
@@ -58,9 +65,11 @@ services:
       - DB_USER=polyquant_user
       - DB_PASSWORD=password123
       - DB_NAME=polyquant
+      - IBKR_HOST=ib_gateway
+    ports:
+      - "2222:22"
     networks:
       - polyquant_net
-    command: tail -f /dev/null
 
   # 4. Python ML Worker
   ml_worker:

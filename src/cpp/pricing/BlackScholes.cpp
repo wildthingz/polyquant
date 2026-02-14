@@ -1,4 +1,4 @@
-#include "BlackScholes.h"
+#include "polyquant/pricing/BlackScholes.h"
 #include <cmath>
 #include <algorithm>
 #include <stdexcept>

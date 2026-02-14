@@ -115,24 +115,13 @@ Welcome to the PolyQuant documentation. This guide will help you understand, bui
 
 ## 📈 Current Project Status
 
-**Phase**: Phase 1 (Local Simulation)
+**See [../STATUS.md](../STATUS.md) for detailed, up-to-date project status.**
 
-**Completed**:
-- ✅ System requirements
-- ✅ Architecture design
-- ✅ Database schema
-- ✅ Documentation structure
-
-**In Progress**:
-- 🚧 C++ pricing engine
-- 🚧 API adapters
-- 🚧 Risk manager
-- 🚧 ML model bootstrap
-
-**Next Steps**:
-1. Implement Black-Scholes pricing ([MATH_SPECS.md](MATH_SPECS.md))
-2. Build IBKR adapter ([API_INTEGRATION.md](API_INTEGRATION.md))
-3. Create risk manager ([TRADING_STRATEGY.md](TRADING_STRATEGY.md#risk-management))
+Quick summary:
+- Phase 1 (~50% complete)
+- Live Polymarket data flowing
+- 14/14 tests passing
+- Risk Manager is next priority
 
 ---
 

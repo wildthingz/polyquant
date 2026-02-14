@@ -73,17 +73,14 @@ public:
     }
 
     void subscribe_to_mag7_markets() {
-        // Subscribe to Mag 7 related markets
+        // Subscribe using CLOB API format with token IDs
+        // Token IDs must be obtained via REST API first
         json subscribe_msg = {
-            {"type", "subscribe"},
-            {"markets", {
-                "AAPL-earnings-beat",
-                "NVDA-stock-above-700",
-                "TSLA-delivery-numbers",
-                "META-user-growth",
-                "AMZN-aws-revenue",
-                "GOOGL-antitrust-ruling",
-                "MSFT-ai-revenue"
+            {"type", "market"},
+            {"assets_ids", {
+                "101676997363687199724245607342877036148401850938023978421879460310389391082353",
+                "4153292802911610701832309484716814274802943278345248636922528170020319407796"
+                // Add more token IDs from REST API /markets endpoint
             }}
         };
 
@@ -144,43 +141,89 @@ private:
 
 ### Message Format
 
-**Incoming Message Example**:
+**Book Message (Order Book Snapshot)**:
 ```json
 {
-  "event_ticker": "AAPL-Q4-2025-EARNINGS-BEAT",
-  "market_id": "0x1234...",
-  "outcome": "YES",
-  "price": 0.72,
-  "volume_24h": 125000.50,
-  "last_trade_price": 0.72,
-  "timestamp": "2025-02-13T14:30:00.123Z"
+  "event_type": "book",
+  "asset_id": "101676997363687199724245607342877036148401850938023978421879460310389391082353",
+  "market": "0xaf9d0e448129a9f657f851d49495ba4742055d80e0ef1166ba0ee81d4d594214",
+  "bids": [
+    {"price": "0.953", "size": "1729.38"},
+    {"price": "0.952", "size": "500.00"}
+  ],
+  "asks": [
+    {"price": "0.955", "size": "2000.00"},
+    {"price": "0.956", "size": "1500.00"}
+  ],
+  "timestamp": "1771050149008",
+  "hash": "c86831e697fe0ce2256f76b502950ff2039fa53a"
+}
+```
+
+**Price Change Message (Incremental Update)**:
+```json
+{
+  "event_type": "price_change",
+  "market": "0xaf9d0e448129a9f657f851d49495ba4742055d80e0ef1166ba0ee81d4d594214",
+  "price_changes": [{
+    "asset_id": "4153292802911610701832309484716814274802943278345248636922528170020319407796",
+    "price": "0.914",
+    "size": "938",
+    "side": "BUY",
+    "hash": "9b1c7951ae5cdb17ac0715a3d5c2c4f064227dde",
+    "best_bid": "0.953",
+    "best_ask": "0.955"
+  }],
+  "timestamp": "1771050149370"
 }
 ```
 
 **Data Extraction**:
 ```c++
 void process_polymarket_update(const json& msg) {
-    // Extract probability (YES price = probability of event)
-    double probability = msg["price"].get<double>();
+    if (!msg.contains("event_type")) return;
 
-    // Calculate 24h change
-    double prev_price = get_previous_price(msg["market_id"]);
-    double change_24h = probability - prev_price;
+    std::string event_type = msg["event_type"];
 
-    // Normalize to [0, 1] if needed
-    probability = std::clamp(probability, 0.0, 1.0);
+    if (event_type == "book") {
+        // Full order book snapshot
+        MarketDataUpdate update;
+        update.source = "polymarket";
+        update.timestamp = std::chrono::system_clock::now();
+        update.asset_id = msg.value("asset_id", "");
+        update.market_id = msg.value("market", "");
 
-    // Emit to event bus
-    MarketDataUpdate update{
-        .source = "polymarket",
-        .ticker = parse_underlying_ticker(msg["event_ticker"]),
-        .poly_prob = probability,
-        .poly_prob_change_24h = change_24h,
-        .poly_volume_usd = msg["volume_24h"].get<double>(),
-        .timestamp = parse_timestamp(msg["timestamp"])
-    };
+        if (msg.contains("bids") && !msg["bids"].empty()) {
+            update.bid = std::stod(msg["bids"][0]["price"].get<std::string>());
+            update.bid_size = std::stod(msg["bids"][0]["size"].get<std::string>());
+        }
+        if (msg.contains("asks") && !msg["asks"].empty()) {
+            update.ask = std::stod(msg["asks"][0]["price"].get<std::string>());
+            update.ask_size = std::stod(msg["asks"][0]["size"].get<std::string>());
+        }
 
-    event_bus_.publish(update);
+        event_bus_.publish(update);
+
+    } else if (event_type == "price_change") {
+        // Incremental price update
+        auto price_change = msg["price_changes"][0];
+
+        MarketDataUpdate update;
+        update.source = "polymarket";
+        update.timestamp = std::chrono::system_clock::now();
+        update.asset_id = price_change.value("asset_id", "");
+        update.market_id = msg.value("market", "");
+        update.price = std::stod(price_change.value("price", "0"));
+
+        if (price_change.contains("best_bid")) {
+            update.bid = std::stod(price_change["best_bid"].get<std::string>());
+        }
+        if (price_change.contains("best_ask")) {
+            update.ask = std::stod(price_change["best_ask"].get<std::string>());
+        }
+
+        event_bus_.publish(update);
+    }
 }
 ```
 

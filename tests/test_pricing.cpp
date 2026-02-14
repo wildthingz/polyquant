@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "pricing/BlackScholes.h"
+#include "polyquant/pricing/BlackScholes.h"
 
 using namespace polyquant::pricing;
 

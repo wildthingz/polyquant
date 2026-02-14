@@ -11,13 +11,27 @@ find_package(PostgreSQL REQUIRED)
 find_package(GTest REQUIRED)
 find_package(Threads REQUIRED)
 find_package(spdlog REQUIRED)
+find_package(OpenSSL REQUIRED)
 
-# ONNX Runtime (Manual include since it doesn't always have a CMake config)
+# ONNX Runtime
 set(ONNXRUNTIME_ROOT /usr/local)
 include_directories(${ONNXRUNTIME_ROOT}/include)
 link_directories(${ONNXRUNTIME_ROOT}/lib)
 
+# IBKR TWS API
+# We need to compile the TWS API source files
+set(TWS_API_DIR /opt/twsapi)
+if(EXISTS ${TWS_API_DIR})
+    include_directories(${TWS_API_DIR})
+    file(GLOB TWS_SOURCES "${TWS_API_DIR}/*.cpp")
+    # Exclude the sample client if it exists (usually EClientSocket.cpp is what we need)
+    # But TWS API folder is flat, so GLOB is fine.
+else()
+    message(WARNING "TWS API not found at ${TWS_API_DIR}. IBKR Client will fail to build.")
+endif()
+
 # Include directories
+include_directories(include)
 include_directories(src/cpp)
 
 # Add subdirectories
@@ -28,11 +42,12 @@ enable_testing()
 file(GLOB_RECURSE TEST_SOURCES "tests/*.cpp")
 
 if(TEST_SOURCES)
-    # We need to link against the implementation files for tests
-    # In a larger project, we'd make a static library for core logic
     add_executable(polyquant_tests
         ${TEST_SOURCES}
         src/cpp/pricing/BlackScholes.cpp
+        src/cpp/core/MarketDataAggregator.cpp
+        src/cpp/core/StrategyEngine.cpp
+        # We don't link IBKR/Polymarket clients in unit tests to avoid external dependencies
     )
 
     target_link_libraries(polyquant_tests PRIVATE
@@ -43,6 +58,8 @@ if(TEST_SOURCES)
         onnxruntime
         Threads::Threads
         spdlog::spdlog
+        OpenSSL::SSL
+        OpenSSL::Crypto
     )
 
     add_test(NAME AllTests COMMAND polyquant_tests)

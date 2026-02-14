@@ -31,3 +31,5 @@ models/*.onnx
 # Temporary files
 tmp/
 .DS_Store
+
+.clion.source.upload.marker
