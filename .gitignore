@@ -1,0 +1,33 @@
+# Build directories
+build/
+cmake-build-*/
+bin/
+lib/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker
+postgres_data/
+.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.pytest_cache/
+
+# Logs
+logs/
+*.log
+
+# Models
+models/*.onnx
+!models/.gitkeep
+
+# Temporary files
+tmp/
+.DS_Store
