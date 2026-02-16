@@ -121,7 +121,8 @@ Quick summary:
 - Phase 1 (~50% complete)
 - Live Polymarket data flowing
 - 14/14 tests passing
-- Risk Manager is next priority
+- **Next: QuantConnect backtesting** (see [../quantconnect/](../quantconnect/))
+- Risk Manager after backtest validation
 
 ---
 

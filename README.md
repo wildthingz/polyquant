@@ -89,8 +89,21 @@ polyquant/
 - ✅ Live Polymarket data flowing
 - ✅ 14/14 tests passing
 - ✅ Signal generation working
-- ⚠️ Risk Manager needed (top priority)
+- 🔄 **Next: QuantConnect backtesting** (see [quantconnect/](quantconnect/))
+- ⚠️ Risk Manager needed (after backtest validation)
 - ⚠️ IBKR paper account required
+
+---
+
+## Backtesting
+
+**Recommended Approach**: Use [QuantConnect](quantconnect/) platform
+- Free tier includes options + sentiment data
+- Unlimited backtests on institutional-grade historical data
+- No data collection/storage needed
+- See [quantconnect/README.md](quantconnect/README.md) for setup
+
+**Alternative**: Build custom infrastructure with [docs/BACKTESTING.md](docs/BACKTESTING.md) (for advanced users)
 
 ---
 

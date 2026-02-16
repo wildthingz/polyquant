@@ -217,41 +217,72 @@ docker-compose exec engine ./cmake-build-debug-docker/polyquant_tests
 
 ## Next Actions (Priority Order)
 
-### Week 1: Risk & Execution
-1. **Implement Risk Manager** (2-3 days)
+### **NEW: QuantConnect Backtesting (HIGHEST PRIORITY)**
+
+**Decision**: Use QuantConnect platform for backtesting instead of collecting historical data manually.
+
+**Why**:
+- Free tier includes US equity options + Brain Sentiment data
+- Institutional-grade historical data (no collection needed)
+- Realistic slippage/costs built-in
+- Unlimited backtests
+- Faster validation (days vs weeks)
+
+**Steps**:
+1. **Run QuantConnect Backtest** (1-2 days)
+   - Upload `quantconnect/main.py` to QuantConnect.com
+   - Run 1-year backtest (2023)
+   - Target: Sharpe > 1.0, Win Rate > 55%, Max DD < 15%
+   - Files: `quantconnect/main.py`, `quantconnect/README.md`
+
+2. **Analyze Results & Tune** (1 day)
+   - Review backtest metrics
+   - Optimize thresholds (sentiment, IV divergence)
+   - Walk-forward validation (H1 train, H2 test)
+
+3. **Export Parameters to C++** (1 day)
+   - Update `StrategyEngine.cpp` with optimized thresholds
+   - Document backtest results in STATUS.md
+
+**Trade-off**: QuantConnect uses Brain Sentiment (not Polymarket), but it's a reasonable proxy for forward-looking sentiment.
+
+---
+
+### Then: Risk & Execution (if backtest successful)
+
+4. **Implement Risk Manager** (2-3 days)
    - Files: `include/polyquant/risk/RiskManager.h`, `src/cpp/risk/RiskManager.cpp`
    - Tests: `tests/test_risk_manager.cpp`
    - Config: `config/risk_params.yaml`
 
-2. **Set up IBKR Paper Account** (1 day)
+5. **Set up IBKR Paper Account** (1 day)
    - Sign up and wait for approval
    - Configure credentials in `.env`
    - Test connection
 
-3. **Implement Order Execution** (1-2 days)
+6. **Implement Order Execution** (1-2 days)
    - Signal → RiskManager → Order → IBKR
    - Handle fills and rejections
 
-### Week 2: Persistence & Testing
-4. **Database Integration** (1 day)
+### Then: Persistence & Testing
+
+7. **Database Integration** (1 day)
    - Write signals to DB
    - Write trades to DB
    - Query helpers
 
-5. **Integration Tests** (1 day)
+8. **Integration Tests** (1 day)
    - End-to-end signal → order → fill
    - Mock IBKR responses
    - WebSocket reconnection
 
-6. **Polymarket Market Discovery** (1 day)
-   - REST API integration
-   - Auto-subscribe to MAG7 markets
+### Then: Live Paper Trading
 
-### Week 3: Polish & Testing
-7. **Run Paper Trading** (1 week)
+9. **Run Paper Trading** (1-2 weeks)
    - Monitor for bugs
    - Collect 100 trades
    - Calculate metrics
+   - Compare vs QuantConnect backtest
 
 ---
 
