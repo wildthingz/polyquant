@@ -124,3 +124,57 @@ CREATE TABLE IF NOT EXISTS account_state (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_account_state_latest ON account_state((1));
+
+-- 6. Historical Polymarket Events (for backtesting)
+CREATE TABLE IF NOT EXISTS polymarket_events (
+    event_id                SERIAL PRIMARY KEY,
+    market_id               TEXT NOT NULL UNIQUE,
+    condition_id            TEXT NOT NULL,
+    question                TEXT NOT NULL,
+    underlying_ticker       VARCHAR(10),
+    event_type              VARCHAR(50),
+    start_date              TIMESTAMPTZ NOT NULL,
+    end_date                TIMESTAMPTZ NOT NULL,
+    resolution              TEXT,
+    resolution_price        DOUBLE PRECISION
+);
+
+CREATE INDEX IF NOT EXISTS idx_poly_events_ticker ON polymarket_events(underlying_ticker, end_date DESC);
+CREATE INDEX IF NOT EXISTS idx_poly_events_type ON polymarket_events(event_type, end_date DESC);
+
+-- 7. Historical Polymarket Timeseries (for backtesting)
+CREATE TABLE IF NOT EXISTS polymarket_timeseries (
+    id                      SERIAL PRIMARY KEY,
+    event_id                INTEGER REFERENCES polymarket_events(event_id) ON DELETE CASCADE,
+    timestamp               TIMESTAMPTZ NOT NULL,
+    yes_price               DOUBLE PRECISION,
+    no_price                DOUBLE PRECISION,
+    volume_24h              DOUBLE PRECISION,
+    liquidity               DOUBLE PRECISION
+);
+
+SELECT create_hypertable('polymarket_timeseries', 'timestamp', if_not_exists => TRUE);
+CREATE INDEX IF NOT EXISTS idx_poly_timeseries_event ON polymarket_timeseries(event_id, timestamp DESC);
+
+-- 8. Historical Options Data (for backtesting)
+CREATE TABLE IF NOT EXISTS options_history (
+    id                      SERIAL PRIMARY KEY,
+    timestamp               TIMESTAMPTZ NOT NULL,
+    underlying              VARCHAR(10) NOT NULL,
+    strike                  DOUBLE PRECISION NOT NULL,
+    expiration              DATE NOT NULL,
+    option_type             VARCHAR(4) NOT NULL CHECK (option_type IN ('CALL', 'PUT')),
+    bid                     DOUBLE PRECISION,
+    ask                     DOUBLE PRECISION,
+    mid                     DOUBLE PRECISION,
+    iv                      DOUBLE PRECISION,
+    delta                   DOUBLE PRECISION,
+    gamma                   DOUBLE PRECISION,
+    vega                    DOUBLE PRECISION,
+    theta                   DOUBLE PRECISION,
+    volume                  INTEGER,
+    open_interest           INTEGER
+);
+
+SELECT create_hypertable('options_history', 'timestamp', if_not_exists => TRUE);
+CREATE INDEX IF NOT EXISTS idx_options_lookup ON options_history(underlying, expiration, strike, option_type, timestamp DESC);
