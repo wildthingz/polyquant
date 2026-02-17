@@ -52,7 +52,7 @@ The EventBus (`include/polyquant/core/EventBus.h`) is a thread-safe pub/sub syst
 - **pricing/**: BlackScholes (options pricing, Greeks, IV solver)
 
 ### Python Components
-- **quantconnect/main.py**: QuantConnect backtesting strategy (current priority)
+- **quantconnect/main.py**: VRP premium selling backtest (iron condors, bull put spreads, bear call spreads) using Brain Sentiment as Polymarket proxy. Ready to run on QuantConnect (2022-2024, $100K). Requires BrainSentimentIndicator7Day data subscription.
 - **scripts/**: Historical data collection (Polymarket events, options quotes)
 
 ### Database (schema.sql)
@@ -68,9 +68,22 @@ The EventBus (`include/polyquant/core/EventBus.h`) is a thread-safe pub/sub syst
 - `tests/test_pricing.cpp` — Black-Scholes, Greeks, IV solver (5 tests)
 - `tests/test_market_data.cpp` — EventBus, Aggregator, StrategyEngine (9 tests)
 
+## Strategy Validation Protocol
+
+Every new strategy (or major strategy change) goes through this pipeline before production. Each stage is cheaper to fail at than the next — filter out bad ideas early.
+
+1. **Rule-based backtest (QuantConnect)** — Implement strategy as simple if/then rules, backtest on QC historical data. Validates the core thesis. Minutes to run.
+2. **ML backtest (QuantConnect)** — Use trade data from step 1 to train XGBoost. Replace fixed thresholds with learned model. Backtest again with walk-forward validation (train on earlier period, test on later). Compare ML vs rule-based.
+3. **Real historical data backtest** — Gather actual data from primary sources (e.g., Polymarket, IBKR), clean it, and backtest locally. Catches proxy bias from step 1-2 (Brain Sentiment ≠ Polymarket).
+4. **Paper forward test** — Run the strategy live with paper money (no real capital). Catches execution issues, slippage, fill quality, operational bugs.
+5. **Small live test ($500)** — Real money, small scale. Catches real market impact and psychological factors.
+6. **Production** — Scale up capital gradually per PHASED_ROLLOUT.md.
+
+A strategy must pass each stage before advancing to the next. If it fails at any stage, iterate or discard — don't skip ahead.
+
 ## Current Status & Priorities
 
-1. **VRP backtest rewrite** — Rewrite QuantConnect strategy for premium selling (iron condors, credit spreads)
+1. **~~VRP backtest rewrite~~** — DONE. `quantconnect/main.py` rewritten for VRP premium selling. Next: run on QuantConnect, validate metrics (Sharpe > 0.8, DD < 20%, WR > 65%). Note: requires BrainSentimentIndicator7Day paid data subscription; may need a free-tier fallback proxy.
 2. **Bug fixes** — Hardcoded markets, reconnection logic, graceful shutdown
 3. **StrategyEngine rewrite** — Replace call-buying logic with VRP premium selling signals
 4. **Risk Manager** — Not yet implemented; needed before any live trading
@@ -83,4 +96,5 @@ The EventBus (`include/polyquant/core/EventBus.h`) is a thread-safe pub/sub syst
 - No WebSocket reconnection logic
 - No graceful shutdown (no SIGTERM handler)
 - Strategy generates signals even without IBKR options data
-- StrategyEngine still implements old call-buying logic (pending VRP premium selling rewrite)
+- StrategyEngine (C++) still implements old call-buying logic (pending VRP premium selling rewrite)
+- quantconnect/main.py not yet validated on QuantConnect — needs backtest run and metrics review

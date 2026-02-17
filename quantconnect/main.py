@@ -1,402 +1,625 @@
-# DEPRECATED: This implements the old call-buying strategy.
-# See docs/TRADING_STRATEGY.md for the new VRP premium selling approach.
-# This file will be rewritten to implement iron condors and credit spreads
-# with Polymarket timing as the next priority task.
 """
-PolyQuant Strategy - QuantConnect Implementation
+PolyQuant VRP Premium Selling Strategy — QuantConnect Backtest
 
-DEPRECATED: Old call-buying strategy. Pending rewrite for VRP premium selling
-(iron condors, credit spreads) with Polymarket timing overlay.
+Sells iron condors and credit spreads on Mag 7 stocks, using Brain Sentiment
+(Polymarket proxy) as a timing signal. Entry when IV is elevated but sentiment
+shows high certainty — the divergence between market-priced uncertainty and
+crowd confidence is our edge.
 
-New target: Sharpe > 0.8, Max DD < 20%, Win Rate > 65%, Return 12-18%
+Targets: Sharpe > 0.8, Max DD < 20%, Win Rate > 65%, Return 12-18% annualized
 """
 
 from AlgorithmImports import *
 from datetime import timedelta
 
 
-class PolyQuantSentimentStrategy(QCAlgorithm):
+class PolyQuantVRPStrategy(QCAlgorithm):
 
-    def Initialize(self):
-        """Initialize algorithm parameters and data subscriptions"""
+    def initialize(self):
+        # --- Backtest period: 3 years (bear 2022, bull 2023, mixed 2024) ---
+        self.set_start_date(2022, 1, 1)
+        self.set_end_date(2024, 12, 31)
+        self.set_cash(100_000)
+        self.set_warmup(30, Resolution.DAILY)
 
-        # Backtest period: 1 year
-        self.SetStartDate(2023, 1, 1)
-        self.SetEndDate(2024, 1, 1)
-
-        # Starting capital
-        self.SetCash(10000)
-
-        # MAG7 universe
-        self.mag7_tickers = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'TSLA', 'META', 'GOOGL']
+        # --- MAG7 universe ---
+        self.mag7_tickers = ["AAPL", "MSFT", "NVDA", "AMZN", "TSLA", "META", "GOOGL"]
         self.equity_symbols = {}
+        self.iv_windows = {}       # {ticker: RollingWindow[float]} — 252 trading days
+        self.sentiment_data = {}   # {ticker: BrainSentimentIndicator7Day symbol}
 
         for ticker in self.mag7_tickers:
-            equity = self.AddEquity(ticker, Resolution.Minute)
-            equity.SetDataNormalizationMode(DataNormalizationMode.Raw)
-            self.equity_symbols[ticker] = equity.Symbol
+            equity = self.add_equity(ticker, Resolution.MINUTE)
+            equity.set_data_normalization_mode(DataNormalizationMode.RAW)
+            self.equity_symbols[ticker] = equity.symbol
 
-            # Add Brain Sentiment data (alternative to Polymarket)
-            self.AddData(BrainSentimentIndicator, ticker, Resolution.Daily)
+            # Options chain with Crank-Nicolson for accurate Greeks
+            option = self.add_option(ticker, Resolution.MINUTE)
+            option.set_filter(lambda u: u.strikes(-15, 15).expiration(
+                timedelta(days=7), timedelta(days=45)
+            ))
+            option.price_model = OptionPriceModels.crank_nicolson_fd()
 
-        # Enable options
-        self.SetSecurityInitializer(lambda security: security.SetMarketPrice(self.GetLastKnownPrice(security)))
+            # Brain Sentiment 7-day (Polymarket proxy)
+            self.sentiment_data[ticker] = self.add_data(
+                BrainSentimentIndicator7Day, equity.symbol
+            ).symbol
 
-        # Track positions
-        self.open_positions = {}  # {option_symbol: PositionData}
+            # IV rolling window: 252 trading days
+            self.iv_windows[ticker] = RollingWindow[float](252)
 
-        # Risk parameters
-        self.max_position_pct = 0.05  # 5% per position
-        self.max_sector_exposure = 0.15  # 15% total MAG7
-        self.daily_loss_limit = -0.02  # -2% daily stop
-        self.max_daily_trades = 10
+        # --- Active spreads tracking ---
+        # Each entry: {
+        #   'ticker', 'type' (bull_put|bear_call|iron_condor),
+        #   'legs' (list of option symbols), 'strategy' (OptionStrategy),
+        #   'credit', 'max_loss', 'entry_time', 'expiry', 'quantity'
+        # }
+        self.active_spreads = []
 
-        self.daily_trades_count = 0
-        self.daily_pnl_start = self.Portfolio.TotalPortfolioValue
+        # --- Risk parameters ---
+        self.max_position_pct = 0.05     # 5% of portfolio per trade (based on max loss)
+        self.max_spreads_per_ticker = 3
+        self.max_sector_exposure = 0.15  # 15% total
+        self.daily_loss_limit = -0.02    # -2% daily halt
 
-        # Strategy parameters
-        self.min_sentiment_score = 0.70  # High sentiment threshold
-        self.min_iv_percentile = 50  # IV must be elevated
-        self.max_iv_percentile = 90  # But not extreme fear
-        self.target_delta_min = 0.20
-        self.target_delta_max = 0.80
-        self.max_spread_pct = 0.05  # 5% max bid-ask spread
+        # --- Strategy parameters ---
+        self.min_iv_percentile = 50
+        self.min_certainty = 0.70
+        self.min_divergence = 0.10
+        self.target_short_delta = 0.20
+        self.target_long_delta = 0.08
+        self.min_credit_width_ratio = 0.30
+        self.max_bid_ask_spread = 0.05   # 5% on entry
+        self.max_bid_ask_exit = 0.08     # 8% liquidity crisis
 
-        # Schedule daily check
-        self.Schedule.On(
-            self.DateRules.EveryDay(),
-            self.TimeRules.AfterMarketOpen('AAPL', 30),
-            self.ScanForSignals
+        # --- Daily state ---
+        self.daily_pnl_start = 0
+        self.daily_halted = False
+
+        # --- Schedules ---
+        self.schedule.on(
+            self.date_rules.every_day(),
+            self.time_rules.after_market_open("AAPL", 1),
+            self.reset_daily,
+        )
+        self.schedule.on(
+            self.date_rules.every_day(),
+            self.time_rules.after_market_open("AAPL", 30),
+            self.scan_for_entries,
+        )
+        self.schedule.on(
+            self.date_rules.every_day(),
+            self.time_rules.every(timedelta(hours=1)),
+            self.monitor_positions,
         )
 
-        # Monitor positions every hour
-        self.Schedule.On(
-            self.DateRules.EveryDay(),
-            self.TimeRules.Every(timedelta(hours=1)),
-            self.MonitorPositions
-        )
+        # --- Stats ---
+        self.closed_spreads = []
 
-        # Reset daily counters
-        self.Schedule.On(
-            self.DateRules.EveryDay(),
-            self.TimeRules.AfterMarketOpen('AAPL', 1),
-            self.ResetDailyCounters
-        )
+        self.debug(f"PolyQuant VRP initialized | ${self.portfolio.cash:,.0f} capital | "
+                   f"{len(self.mag7_tickers)} tickers")
 
-        self.Debug(f"PolyQuant initialized with ${self.Portfolio.Cash} capital")
+    # =========================================================================
+    # Daily reset
+    # =========================================================================
 
-    def ResetDailyCounters(self):
-        """Reset daily trade limits and P&L tracking"""
-        self.daily_trades_count = 0
-        self.daily_pnl_start = self.Portfolio.TotalPortfolioValue
+    def reset_daily(self):
+        self.daily_pnl_start = self.portfolio.total_portfolio_value
+        self.daily_halted = False
 
-    def ScanForSignals(self):
-        """
-        Scan MAG7 stocks for entry signals
+    # =========================================================================
+    # Entry scanning
+    # =========================================================================
 
-        Entry criteria:
-        - High sentiment (proxy for Polymarket bullish probability)
-        - Elevated IV (50-90th percentile)
-        - Sentiment > IV divergence (mispricing opportunity)
-        - Delta 0.20-0.80
-        - Spread < 5%
-        """
+    def scan_for_entries(self):
+        if self.is_warming_up:
+            return
 
-        # Check daily loss limit
-        daily_pnl_pct = (self.Portfolio.TotalPortfolioValue - self.daily_pnl_start) / self.daily_pnl_start
+        # Daily loss halt
+        if self.daily_halted:
+            return
+        daily_pnl_pct = ((self.portfolio.total_portfolio_value - self.daily_pnl_start)
+                         / self.daily_pnl_start) if self.daily_pnl_start > 0 else 0
         if daily_pnl_pct <= self.daily_loss_limit:
-            self.Debug(f"Daily loss limit reached: {daily_pnl_pct:.2%}")
-            return
-
-        # Check trade limit
-        if self.daily_trades_count >= self.max_daily_trades:
+            self.daily_halted = True
+            self.debug(f"DAILY HALT | P&L {daily_pnl_pct:.2%}")
             return
 
         for ticker in self.mag7_tickers:
-            if ticker not in self.equity_symbols:
-                continue
+            self.evaluate_ticker(ticker)
 
-            equity_symbol = self.equity_symbols[ticker]
+    def evaluate_ticker(self, ticker):
+        equity_symbol = self.equity_symbols[ticker]
 
-            # Get sentiment data (proxy for Polymarket)
-            sentiment = self.GetSentimentScore(ticker)
-            if sentiment is None or sentiment < self.min_sentiment_score:
-                continue
-
-            # Get option chain
-            option_chain = self.OptionChainProvider.GetOptionContractList(equity_symbol, self.Time)
-            if not option_chain:
-                continue
-
-            # Filter: 7-60 DTE, calls only (long sentiment)
-            filtered_contracts = [
-                contract for contract in option_chain
-                if 7 <= (contract.ID.Date - self.Time).days <= 60
-                and contract.ID.OptionRight == OptionRight.Call
-            ]
-
-            if not filtered_contracts:
-                continue
-
-            # Add option data
-            for contract in filtered_contracts[:50]:  # Limit to 50 contracts per ticker
-                self.AddOptionContract(contract, Resolution.Minute)
-
-            # Evaluate each contract
-            underlying_price = self.Securities[equity_symbol].Price
-
-            for contract in filtered_contracts:
-                signal = self.EvaluateContract(contract, underlying_price, sentiment)
-
-                if signal and signal['strength'] > 0.80:
-                    self.EnterPosition(contract, signal)
-                    break  # One position per ticker at a time
-
-    def GetSentimentScore(self, ticker):
-        """
-        Get Brain Sentiment score (proxy for Polymarket probability)
-
-        Returns:
-            Sentiment score 0-1, or None if unavailable
-        """
-        try:
-            sentiment_data = self.Securities[ticker].Get(BrainSentimentIndicator)
-            if sentiment_data:
-                # Brain Sentiment ranges -1 to 1, normalize to 0-1
-                return (sentiment_data.Sentiment + 1) / 2
-        except:
-            pass
-
-        return None
-
-    def EvaluateContract(self, contract, underlying_price, sentiment):
-        """
-        Evaluate option contract for entry signal
-
-        Args:
-            contract: OptionContract
-            underlying_price: Current underlying price
-            sentiment: Sentiment score 0-1
-
-        Returns:
-            Signal dict or None
-        """
-        if contract not in self.Securities:
-            return None
-
-        option = self.Securities[contract]
-
-        # Check liquidity
-        if option.BidPrice == 0 or option.AskPrice == 0:
-            return None
-
-        spread_pct = (option.AskPrice - option.BidPrice) / ((option.AskPrice + option.BidPrice) / 2)
-        if spread_pct > self.max_spread_pct:
-            return None
-
-        # Get greeks
-        iv = option.ImpliedVolatility
-        delta = option.Greeks.Delta
-
-        if iv == 0 or delta == 0:
-            return None
-
-        # Check delta range
-        if not (self.target_delta_min <= delta <= self.target_delta_max):
-            return None
-
-        # Calculate IV percentile (approximate: use 30-day lookback)
-        iv_percentile = self.EstimateIVPercentile(contract, iv)
-
-        if not (self.min_iv_percentile <= iv_percentile <= self.max_iv_percentile):
-            return None
-
-        # Key divergence: sentiment > IV (normalized)
-        # High sentiment + elevated IV = market pricing uncertainty, but sentiment shows confidence
-        normalized_iv = iv_percentile / 100.0
-        divergence = sentiment - normalized_iv
-
-        if divergence < 0.10:  # Need at least 10% divergence
-            return None
-
-        # Calculate signal strength
-        strength = min(sentiment * 0.5 + divergence * 0.5, 1.0)
-
-        return {
-            'strength': strength,
-            'entry_price': option.AskPrice,  # Pay the ask for entry
-            'delta': delta,
-            'iv': iv,
-            'iv_percentile': iv_percentile,
-            'sentiment': sentiment,
-            'divergence': divergence,
-            'spread_pct': spread_pct
-        }
-
-    def EstimateIVPercentile(self, contract, current_iv):
-        """
-        Estimate IV percentile (simplified - use 30-day rolling window)
-
-        In production, would use historical IV data
-        """
-        # TODO: Calculate actual percentile from historical IV
-        # For MVP: assume 50-70 is "elevated"
-
-        if current_iv > 0.50:
-            return 75  # High IV
-        elif current_iv > 0.35:
-            return 60  # Elevated
-        else:
-            return 40  # Normal
-
-    def EnterPosition(self, contract, signal):
-        """
-        Enter long call position
-
-        Args:
-            contract: OptionContract
-            signal: Signal dict with strength, entry_price, etc.
-        """
-        # Risk checks
-        current_exposure = sum(
-            self.Portfolio[pos].HoldingsValue
-            for pos in self.open_positions.keys()
-            if self.Portfolio[pos].Invested
-        )
-
-        if current_exposure / self.Portfolio.TotalPortfolioValue > self.max_sector_exposure:
-            self.Debug("Sector exposure limit reached")
+        # --- Get option chain ---
+        chain = self.current_slice.option_chains.get(equity_symbol)
+        if chain is None:
+            # Try canonical symbol lookup
+            for kvp in self.current_slice.option_chains:
+                if kvp.Key.underlying == equity_symbol:
+                    chain = kvp.Value
+                    break
+        if chain is None:
             return
 
-        # Position sizing: fixed % of portfolio
-        position_value = self.Portfolio.TotalPortfolioValue * self.max_position_pct
-        entry_price = signal['entry_price']
-        quantity = int(position_value / (entry_price * 100))
+        # --- Update IV window with ATM IV ---
+        underlying_price = self.securities[equity_symbol].price
+        if underlying_price <= 0:
+            return
 
+        atm_iv = self._get_atm_iv(chain, underlying_price)
+        if atm_iv is not None and atm_iv > 0:
+            self.iv_windows[ticker].add(atm_iv)
+
+        # --- IV percentile check ---
+        iv_pctl = self.get_iv_percentile(ticker, atm_iv)
+        if iv_pctl is None or iv_pctl < self.min_iv_percentile:
+            return
+
+        # --- Sentiment ---
+        sentiment = self.get_sentiment(ticker)
+        if sentiment is None:
+            return
+
+        # --- Certainty & divergence ---
+        certainty = max(sentiment, 1 - sentiment)
+        if certainty < self.min_certainty:
+            return
+
+        divergence = certainty - (1 - iv_pctl / 100)
+        if divergence < self.min_divergence:
+            return
+
+        # --- Per-ticker position limit ---
+        ticker_count = sum(1 for s in self.active_spreads if s["ticker"] == ticker)
+        if ticker_count >= self.max_spreads_per_ticker:
+            return
+
+        # --- Sector exposure check ---
+        total_exposure = sum(s["max_loss"] * s["quantity"] for s in self.active_spreads)
+        if total_exposure / self.portfolio.total_portfolio_value >= self.max_sector_exposure:
+            return
+
+        # --- Route to trade type based on sentiment ---
+        if sentiment > 0.70:
+            self.enter_bull_put_spread(ticker, chain, underlying_price, iv_pctl, sentiment)
+        elif sentiment < 0.30:
+            self.enter_bear_call_spread(ticker, chain, underlying_price, iv_pctl, sentiment)
+        elif 0.40 <= sentiment <= 0.60:
+            self.enter_iron_condor(ticker, chain, underlying_price, iv_pctl, sentiment)
+        # else: 0.30-0.40 or 0.60-0.70 — skip, not confident enough
+
+    # =========================================================================
+    # Entry: Bull Put Spread (sentiment > 0.70)
+    # =========================================================================
+
+    def enter_bull_put_spread(self, ticker, chain, underlying_price, iv_pctl, sentiment):
+        expiry = self.select_expiry(chain)
+        if expiry is None:
+            return
+
+        puts = [c for c in chain
+                if c.right == OptionRight.PUT and c.expiry == expiry]
+        if len(puts) < 2:
+            return
+
+        # Find short put near 0.20 delta, long put near 0.08 delta
+        short_put = self._select_by_delta(puts, self.target_short_delta)
+        long_put = self._select_by_delta(
+            [p for p in puts if p.strike < short_put.strike], self.target_long_delta
+        ) if short_put else None
+
+        if short_put is None or long_put is None:
+            return
+        if long_put.strike >= short_put.strike:
+            return
+
+        # Liquidity check
+        if not self.check_liquidity([short_put, long_put]):
+            return
+
+        # Credit and width
+        credit = short_put.bid_price - long_put.ask_price
+        width = (short_put.strike - long_put.strike)
+        if width <= 0 or credit <= 0:
+            return
+        if credit / width < self.min_credit_width_ratio:
+            return
+
+        max_loss_per_contract = (width - credit) * 100
+        quantity = self._calc_quantity(max_loss_per_contract)
         if quantity < 1:
             return
 
-        # Place order
-        self.MarketOrder(contract, quantity)
+        # Place order via OptionStrategies
+        strategy = OptionStrategies.bull_put_spread(
+            equity_symbol=self.equity_symbols[ticker],
+            higher_strike=short_put.strike,
+            lower_strike=long_put.strike,
+            expiration=expiry,
+        )
+        tickets = self.buy(strategy, quantity)
 
-        # Track position
-        self.open_positions[contract] = {
-            'entry_time': self.Time,
-            'entry_price': entry_price,
-            'quantity': quantity,
-            'signal_strength': signal['strength'],
-            'delta': signal['delta'],
-            'iv': signal['iv'],
-            'exit_reason': None
-        }
+        self.active_spreads.append({
+            "ticker": ticker,
+            "type": "bull_put",
+            "legs": [short_put.symbol, long_put.symbol],
+            "strategy": strategy,
+            "credit": credit,
+            "max_loss": max_loss_per_contract / 100,
+            "entry_time": self.time,
+            "expiry": expiry,
+            "quantity": quantity,
+            "iv_pctl": iv_pctl,
+            "sentiment": sentiment,
+        })
 
-        self.daily_trades_count += 1
+        self.debug(f"ENTER bull_put | {ticker} | "
+                   f"short={short_put.strike} long={long_put.strike} | "
+                   f"credit=${credit:.2f} width=${width:.2f} | "
+                   f"qty={quantity} | IV%={iv_pctl:.0f} sent={sentiment:.2f}")
 
-        self.Debug(f"BUY {contract.ID.Symbol} x{quantity} @ ${entry_price:.2f} | "
-                   f"Strength={signal['strength']:.2f} | Divergence={signal['divergence']:.2f}")
+    # =========================================================================
+    # Entry: Bear Call Spread (sentiment < 0.30)
+    # =========================================================================
 
-    def MonitorPositions(self):
-        """
-        Check exit triggers for open positions
+    def enter_bear_call_spread(self, ticker, chain, underlying_price, iv_pctl, sentiment):
+        expiry = self.select_expiry(chain)
+        if expiry is None:
+            return
 
-        Exit triggers:
-        1. +50% profit (take profit)
-        2. -30% loss (stop loss)
-        3. 1 DTE (theta acceleration)
-        4. Spread > 8% (liquidity crisis)
-        """
-        positions_to_close = []
+        calls = [c for c in chain
+                 if c.right == OptionRight.CALL and c.expiry == expiry]
+        if len(calls) < 2:
+            return
 
-        for contract, pos_data in self.open_positions.items():
-            if not self.Portfolio[contract].Invested:
-                continue
+        # Find short call near 0.20 delta, long call near 0.08 delta
+        short_call = self._select_by_delta(calls, self.target_short_delta)
+        long_call = self._select_by_delta(
+            [c for c in calls if c.strike > short_call.strike], self.target_long_delta
+        ) if short_call else None
 
-            if contract not in self.Securities:
-                continue
+        if short_call is None or long_call is None:
+            return
+        if long_call.strike <= short_call.strike:
+            return
 
-            option = self.Securities[contract]
+        if not self.check_liquidity([short_call, long_call]):
+            return
 
-            # Check liquidity
-            if option.BidPrice == 0:
-                continue
+        credit = short_call.bid_price - long_call.ask_price
+        width = (long_call.strike - short_call.strike)
+        if width <= 0 or credit <= 0:
+            return
+        if credit / width < self.min_credit_width_ratio:
+            return
 
-            # Calculate P&L
-            current_price = option.BidPrice
-            entry_price = pos_data['entry_price']
-            pnl_pct = (current_price - entry_price) / entry_price
+        max_loss_per_contract = (width - credit) * 100
+        quantity = self._calc_quantity(max_loss_per_contract)
+        if quantity < 1:
+            return
 
+        strategy = OptionStrategies.bear_call_spread(
+            equity_symbol=self.equity_symbols[ticker],
+            lower_strike=short_call.strike,
+            higher_strike=long_call.strike,
+            expiration=expiry,
+        )
+        tickets = self.buy(strategy, quantity)
+
+        self.active_spreads.append({
+            "ticker": ticker,
+            "type": "bear_call",
+            "legs": [short_call.symbol, long_call.symbol],
+            "strategy": strategy,
+            "credit": credit,
+            "max_loss": max_loss_per_contract / 100,
+            "entry_time": self.time,
+            "expiry": expiry,
+            "quantity": quantity,
+            "iv_pctl": iv_pctl,
+            "sentiment": sentiment,
+        })
+
+        self.debug(f"ENTER bear_call | {ticker} | "
+                   f"short={short_call.strike} long={long_call.strike} | "
+                   f"credit=${credit:.2f} width=${width:.2f} | "
+                   f"qty={quantity} | IV%={iv_pctl:.0f} sent={sentiment:.2f}")
+
+    # =========================================================================
+    # Entry: Iron Condor (sentiment 0.40-0.60)
+    # =========================================================================
+
+    def enter_iron_condor(self, ticker, chain, underlying_price, iv_pctl, sentiment):
+        expiry = self.select_expiry(chain)
+        if expiry is None:
+            return
+
+        puts = [c for c in chain
+                if c.right == OptionRight.PUT and c.expiry == expiry]
+        calls = [c for c in chain
+                 if c.right == OptionRight.CALL and c.expiry == expiry]
+        if len(puts) < 2 or len(calls) < 2:
+            return
+
+        # Put side: short ~0.20 delta, long ~0.08 delta
+        short_put = self._select_by_delta(puts, self.target_short_delta)
+        long_put = self._select_by_delta(
+            [p for p in puts if p.strike < short_put.strike], self.target_long_delta
+        ) if short_put else None
+
+        # Call side: short ~0.20 delta, long ~0.08 delta
+        short_call = self._select_by_delta(calls, self.target_short_delta)
+        long_call = self._select_by_delta(
+            [c for c in calls if c.strike > short_call.strike], self.target_long_delta
+        ) if short_call else None
+
+        if any(x is None for x in [short_put, long_put, short_call, long_call]):
+            return
+        if long_put.strike >= short_put.strike or long_call.strike <= short_call.strike:
+            return
+
+        all_legs = [short_put, long_put, short_call, long_call]
+        if not self.check_liquidity(all_legs):
+            return
+
+        put_credit = short_put.bid_price - long_put.ask_price
+        call_credit = short_call.bid_price - long_call.ask_price
+        total_credit = put_credit + call_credit
+
+        put_width = short_put.strike - long_put.strike
+        call_width = long_call.strike - short_call.strike
+        max_width = max(put_width, call_width)
+
+        if max_width <= 0 or total_credit <= 0:
+            return
+
+        # Credit/width ratio uses wider side (worst case)
+        if total_credit / max_width < self.min_credit_width_ratio:
+            return
+
+        max_loss_per_contract = (max_width - total_credit) * 100
+        quantity = self._calc_quantity(max_loss_per_contract)
+        if quantity < 1:
+            return
+
+        strategy = OptionStrategies.iron_condor(
+            equity_symbol=self.equity_symbols[ticker],
+            long_put_strike=long_put.strike,
+            short_put_strike=short_put.strike,
+            short_call_strike=short_call.strike,
+            long_call_strike=long_call.strike,
+            expiration=expiry,
+        )
+        tickets = self.buy(strategy, quantity)
+
+        self.active_spreads.append({
+            "ticker": ticker,
+            "type": "iron_condor",
+            "legs": [s.symbol for s in all_legs],
+            "strategy": strategy,
+            "credit": total_credit,
+            "max_loss": max_loss_per_contract / 100,
+            "entry_time": self.time,
+            "expiry": expiry,
+            "quantity": quantity,
+            "iv_pctl": iv_pctl,
+            "sentiment": sentiment,
+        })
+
+        self.debug(f"ENTER iron_condor | {ticker} | "
+                   f"puts={long_put.strike}/{short_put.strike} "
+                   f"calls={short_call.strike}/{long_call.strike} | "
+                   f"credit=${total_credit:.2f} | qty={quantity} | "
+                   f"IV%={iv_pctl:.0f} sent={sentiment:.2f}")
+
+    # =========================================================================
+    # Position monitoring & exits
+    # =========================================================================
+
+    def monitor_positions(self):
+        if self.is_warming_up or not self.active_spreads:
+            return
+
+        to_close = []
+
+        for i, spread in enumerate(self.active_spreads):
+            # Unrealized P&L across all legs (short credit = we want value to decrease)
+            unrealized = sum(
+                self.portfolio[sym].unrealized_profit
+                for sym in spread["legs"]
+                if sym in self.portfolio
+            )
+
+            credit_received = spread["credit"] * spread["quantity"] * 100
             exit_reason = None
 
-            # 1. Take profit: +50%
-            if pnl_pct >= 0.50:
-                exit_reason = "PROFIT_TARGET"
+            # 1. Take profit: captured >= 50% of credit
+            if unrealized >= 0.50 * credit_received:
+                exit_reason = "TAKE_PROFIT"
 
-            # 2. Stop loss: -30%
-            elif pnl_pct <= -0.30:
+            # 2. Stop loss: loss >= 1x credit (spread value doubled)
+            elif unrealized <= -credit_received:
                 exit_reason = "STOP_LOSS"
 
-            # 3. Days to expiry <= 1
-            elif (contract.ID.Date - self.Time).days <= 1:
+            # 3. Theta burn: DTE <= 1
+            elif (spread["expiry"] - self.time).days <= 1:
                 exit_reason = "THETA_BURN"
 
-            # 4. Liquidity crisis: spread > 8%
-            elif option.AskPrice > 0:
-                spread_pct = (option.AskPrice - option.BidPrice) / ((option.AskPrice + option.BidPrice) / 2)
-                if spread_pct > 0.08:
-                    exit_reason = "LIQUIDITY"
+            # 4. Liquidity crisis: any leg spread > 8%
+            elif self._any_leg_illiquid(spread["legs"]):
+                exit_reason = "LIQUIDITY"
 
             if exit_reason:
-                positions_to_close.append((contract, exit_reason, current_price, pnl_pct))
+                to_close.append((i, exit_reason, unrealized))
 
-        # Close positions
-        for contract, reason, exit_price, pnl_pct in positions_to_close:
-            self.ExitPosition(contract, reason, exit_price, pnl_pct)
+        # Close in reverse order to keep indices valid
+        for i, reason, pnl in sorted(to_close, key=lambda x: x[0], reverse=True):
+            self.close_spread(i, reason, pnl)
 
-    def ExitPosition(self, contract, reason, exit_price, pnl_pct):
+    def close_spread(self, index, reason, unrealized_pnl):
+        spread = self.active_spreads[index]
+
+        # Liquidate all legs
+        for sym in spread["legs"]:
+            if self.portfolio[sym].invested:
+                self.liquidate(sym)
+
+        self.debug(f"EXIT {spread['type']} | {spread['ticker']} | "
+                   f"reason={reason} | P&L=${unrealized_pnl:,.2f} | "
+                   f"held {(self.time - spread['entry_time']).days}d")
+
+        # Record for stats
+        self.closed_spreads.append({
+            "ticker": spread["ticker"],
+            "type": spread["type"],
+            "credit": spread["credit"],
+            "quantity": spread["quantity"],
+            "pnl": unrealized_pnl,
+            "reason": reason,
+            "held_days": (self.time - spread["entry_time"]).days,
+            "iv_pctl": spread["iv_pctl"],
+            "sentiment": spread["sentiment"],
+        })
+
+        self.active_spreads.pop(index)
+
+    # =========================================================================
+    # Helpers
+    # =========================================================================
+
+    def select_expiry(self, chain):
+        """Find expiry nearest to 30 DTE within the 7-45 day window."""
+        target_dte = 30
+        expiries = sorted(set(c.expiry for c in chain))
+        valid = [e for e in expiries if 7 <= (e - self.time).days <= 45]
+        if not valid:
+            return None
+        return min(valid, key=lambda e: abs((e - self.time).days - target_dte))
+
+    def get_iv_percentile(self, ticker, current_iv):
+        """Percentile rank of current ATM IV vs. 252-day window."""
+        window = self.iv_windows[ticker]
+        if not window.is_ready or current_iv is None:
+            return None
+        count_below = sum(1 for i in range(window.count) if window[i] < current_iv)
+        return (count_below / window.count) * 100
+
+    def get_sentiment(self, ticker):
         """
-        Exit position
-
-        Args:
-            contract: OptionContract
-            reason: Exit reason
-            exit_price: Exit price
-            pnl_pct: P&L percentage
+        Read BrainSentimentIndicator7Day, normalize from [-1, +1] to [0, 1].
+        Returns None if unavailable.
         """
-        self.Liquidate(contract)
+        sym = self.sentiment_data.get(ticker)
+        if sym is None or sym not in self.securities:
+            return None
+        security = self.securities[sym]
+        if security is None or not security.has_data:
+            return None
+        try:
+            value = security.price  # BrainSentiment stores sentiment as Price
+            # Clamp to [-1, 1] then normalize to [0, 1]
+            value = max(-1.0, min(1.0, value))
+            return (value + 1) / 2
+        except Exception:
+            return None
 
-        pos_data = self.open_positions[contract]
-        pos_data['exit_reason'] = reason
-        pos_data['exit_price'] = exit_price
-        pos_data['pnl_pct'] = pnl_pct
+    def check_liquidity(self, contracts):
+        """Check bid-ask spread < 5% on all legs."""
+        for c in contracts:
+            if c.bid_price <= 0 or c.ask_price <= 0:
+                return False
+            mid = (c.bid_price + c.ask_price) / 2
+            if mid <= 0:
+                return False
+            spread_pct = (c.ask_price - c.bid_price) / mid
+            if spread_pct > self.max_bid_ask_spread:
+                return False
+        return True
 
-        self.Debug(f"SELL {contract.ID.Symbol} @ ${exit_price:.2f} | "
-                   f"P&L={pnl_pct:.1%} | Reason={reason}")
+    def _get_atm_iv(self, chain, underlying_price):
+        """Get ATM implied volatility from the chain."""
+        atm = min(chain, key=lambda c: abs(c.strike - underlying_price), default=None)
+        if atm is None:
+            return None
+        return atm.implied_volatility if atm.implied_volatility > 0 else None
 
-    def OnEndOfAlgorithm(self):
-        """Final statistics"""
-        self.Debug(f"\n{'='*60}")
-        self.Debug(f"BACKTEST COMPLETE")
-        self.Debug(f"{'='*60}")
-        self.Debug(f"Final Portfolio Value: ${self.Portfolio.TotalPortfolioValue:,.2f}")
-        self.Debug(f"Total Return: {(self.Portfolio.TotalPortfolioValue / 10000 - 1):.1%}")
-        self.Debug(f"Total Trades: {len(self.open_positions)}")
+    def _select_by_delta(self, contracts, target_delta):
+        """Select the contract whose absolute delta is closest to target."""
+        valid = [c for c in contracts
+                 if c.greeks is not None and c.greeks.delta != 0]
+        if not valid:
+            return None
+        return min(valid, key=lambda c: abs(abs(c.greeks.delta) - target_delta))
 
-        # Calculate win rate
-        closed_positions = [
-            pos for pos in self.open_positions.values()
-            if 'pnl_pct' in pos
-        ]
+    def _calc_quantity(self, max_loss_per_contract):
+        """Position size: max 5% of portfolio risk per trade."""
+        if max_loss_per_contract <= 0:
+            return 0
+        risk_budget = self.portfolio.total_portfolio_value * self.max_position_pct
+        return int(risk_budget / max_loss_per_contract)
 
-        if closed_positions:
-            winners = sum(1 for pos in closed_positions if pos['pnl_pct'] > 0)
-            win_rate = winners / len(closed_positions)
-            avg_win = sum(pos['pnl_pct'] for pos in closed_positions if pos['pnl_pct'] > 0) / max(winners, 1)
-            losers = len(closed_positions) - winners
-            avg_loss = sum(pos['pnl_pct'] for pos in closed_positions if pos['pnl_pct'] < 0) / max(losers, 1)
+    def _any_leg_illiquid(self, leg_symbols):
+        """Check if any leg has bid-ask spread > 8%."""
+        for sym in leg_symbols:
+            if sym not in self.securities:
+                continue
+            sec = self.securities[sym]
+            if sec.bid_price <= 0 or sec.ask_price <= 0:
+                continue
+            mid = (sec.bid_price + sec.ask_price) / 2
+            if mid <= 0:
+                continue
+            if (sec.ask_price - sec.bid_price) / mid > self.max_bid_ask_exit:
+                return True
+        return False
 
-            self.Debug(f"Win Rate: {win_rate:.1%}")
-            self.Debug(f"Avg Win: {avg_win:.1%}")
-            self.Debug(f"Avg Loss: {avg_loss:.1%}")
-            self.Debug(f"Profit Factor: {abs(avg_win * winners / (avg_loss * losers)):.2f}")
+    # =========================================================================
+    # End of algorithm stats
+    # =========================================================================
 
-        self.Debug(f"{'='*60}\n")
+    def on_end_of_algorithm(self):
+        self.debug(f"\n{'='*60}")
+        self.debug("POLYQUANT VRP BACKTEST COMPLETE")
+        self.debug(f"{'='*60}")
+        self.debug(f"Final Value:  ${self.portfolio.total_portfolio_value:,.2f}")
+        self.debug(f"Total Return: {(self.portfolio.total_portfolio_value / 100_000 - 1):.1%}")
+        self.debug(f"Total Trades: {len(self.closed_spreads)}")
+
+        if not self.closed_spreads:
+            self.debug("No closed trades to analyze.")
+            return
+
+        winners = [s for s in self.closed_spreads if s["pnl"] > 0]
+        losers = [s for s in self.closed_spreads if s["pnl"] <= 0]
+        win_rate = len(winners) / len(self.closed_spreads)
+
+        avg_win = (sum(s["pnl"] for s in winners) / len(winners)) if winners else 0
+        avg_loss = (sum(s["pnl"] for s in losers) / len(losers)) if losers else 0
+        total_pnl = sum(s["pnl"] for s in self.closed_spreads)
+
+        self.debug(f"Win Rate:     {win_rate:.1%} ({len(winners)}W / {len(losers)}L)")
+        self.debug(f"Avg Win:      ${avg_win:,.2f}")
+        self.debug(f"Avg Loss:     ${avg_loss:,.2f}")
+        if losers and avg_loss != 0:
+            self.debug(f"Profit Factor: {abs(sum(s['pnl'] for s in winners) / sum(s['pnl'] for s in losers)):.2f}")
+        self.debug(f"Total P&L:    ${total_pnl:,.2f}")
+
+        # Breakdown by trade type
+        for trade_type in ["bull_put", "bear_call", "iron_condor"]:
+            trades = [s for s in self.closed_spreads if s["type"] == trade_type]
+            if trades:
+                type_pnl = sum(s["pnl"] for s in trades)
+                type_wr = sum(1 for s in trades if s["pnl"] > 0) / len(trades)
+                self.debug(f"  {trade_type:14s}: {len(trades):3d} trades | "
+                           f"WR {type_wr:.0%} | P&L ${type_pnl:,.2f}")
+
+        # Breakdown by exit reason
+        for reason in ["TAKE_PROFIT", "STOP_LOSS", "THETA_BURN", "LIQUIDITY"]:
+            trades = [s for s in self.closed_spreads if s["reason"] == reason]
+            if trades:
+                self.debug(f"  {reason:14s}: {len(trades):3d} exits")
+
+        avg_hold = sum(s["held_days"] for s in self.closed_spreads) / len(self.closed_spreads)
+        self.debug(f"Avg Hold:     {avg_hold:.1f} days")
+        self.debug(f"{'='*60}\n")
