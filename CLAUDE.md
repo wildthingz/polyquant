@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PolyQuant is an event-driven options trading system that uses Polymarket prediction market data as a sentiment indicator for trading options on Mag 7 stocks (AAPL, NVDA, MSFT, AMZN, TSLA, META, GOOGL). Currently in Phase 1 (Local Simulation, ~50% complete).
+PolyQuant is an event-driven options trading system that sells premium (iron condors, credit spreads) on Mag 7 stocks (AAPL, NVDA, MSFT, AMZN, TSLA, META, GOOGL), using Polymarket prediction market data as a timing signal to identify when event uncertainty is overpriced. Strategy: VRP (Volatility Risk Premium) harvesting with Polymarket timing overlay. Target: 12-18% annualized, Sharpe ~0.8. Currently in Phase 1 (Local Simulation, ~50% complete).
 
-**Tech stack**: C++20 execution engine + Python 3.10 ML pipeline + PostgreSQL/TimescaleDB + Docker
+**Tech stack**: C++20 execution engine + Python 3.10 backtesting + PostgreSQL/TimescaleDB + Docker
 
 ## Build & Development Commands
 
@@ -44,7 +44,7 @@ CMake uses C++20 with `-Wall -Wextra -O3`. Dependencies: Boost (asio), nlohmann/
 Polymarket WebSocket → PolymarketClient → EventBus → MarketDataAggregator → StrategyEngine → [Risk Manager] → [Order Execution]
 ```
 
-The EventBus (`include/polyquant/core/EventBus.h`) is a thread-safe pub/sub system that decouples all components. Currently, live Polymarket data flows through to signal generation but risk management and order execution are not yet implemented.
+The EventBus (`include/polyquant/core/EventBus.h`) is a thread-safe pub/sub system that decouples all components. Currently, live Polymarket data flows through to signal generation but risk management and order execution are not yet implemented. StrategyEngine will be rewritten to generate multi-leg premium selling signals (iron condors, credit spreads) instead of current call-buying signals.
 
 ### C++ Engine (src/cpp/, include/polyquant/)
 - **core/**: EventBus (pub/sub), MarketDataAggregator (merges Polymarket + IBKR feeds), StrategyEngine (signal generation)
@@ -70,10 +70,12 @@ The EventBus (`include/polyquant/core/EventBus.h`) is a thread-safe pub/sub syst
 
 ## Current Status & Priorities
 
-1. **QuantConnect backtesting** — Validate strategy before building more infrastructure
-2. **Risk Manager** — Not yet implemented; needed before any live trading
-3. **Order Execution** — IBKRClient needs paper trading implementation
-4. **Database Persistence** — Schema exists but no writes from C++ engine yet
+1. **VRP backtest rewrite** — Rewrite QuantConnect strategy for premium selling (iron condors, credit spreads)
+2. **Bug fixes** — Hardcoded markets, reconnection logic, graceful shutdown
+3. **StrategyEngine rewrite** — Replace call-buying logic with VRP premium selling signals
+4. **Risk Manager** — Not yet implemented; needed before any live trading
+5. **Order Execution** — IBKRClient needs multi-leg combo order support
+6. **Database Persistence** — Schema exists but no writes from C++ engine yet
 
 ## Known Issues
 
@@ -81,3 +83,4 @@ The EventBus (`include/polyquant/core/EventBus.h`) is a thread-safe pub/sub syst
 - No WebSocket reconnection logic
 - No graceful shutdown (no SIGTERM handler)
 - Strategy generates signals even without IBKR options data
+- StrategyEngine still implements old call-buying logic (pending VRP premium selling rewrite)

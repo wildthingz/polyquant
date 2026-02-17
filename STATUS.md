@@ -14,11 +14,11 @@
 | Polymarket Feed | ✅ Live Data | WebSocket receiving real-time prices |
 | IBKR Feed | ⚠️ Skeleton | Needs paper trading account |
 | MarketDataAggregator | ✅ Working | Merges feeds, 2 tests passing |
-| StrategyEngine | ✅ Partial | Signals generating, no execution |
+| StrategyEngine | ⚠️ Old Logic | Generates call-buying signals (pending VRP premium selling rewrite) |
 | Pricing Engine | ✅ Complete | Black-Scholes, Greeks, IV solver (5 tests) |
 | Risk Manager | ❌ Missing | **CRITICAL - Top Priority** |
 | Database | ⚠️ Ready | Schema exists, no data written |
-| ML Model | ❌ Not Started | Phase 1 can work without it |
+| Rule-Based Signals | ❌ Not Started | VRP premium selling logic (replaces ML model) |
 | Tests | ✅ Passing | 14/14 tests (35ms) |
 
 ---
@@ -56,8 +56,9 @@ Polymarket WSS → PolymarketClient → EventBus → MarketDataAggregator → St
 - Tests: StoresAndRetrievesSnapshot, ReturnsEmptyForUnknownContract
 
 **StrategyEngine** (`src/cpp/core/StrategyEngine.cpp`)
-- Entry logic: `poly_prob > 0.80` AND `spread < 5%`
-- Generates BUY/HOLD/SELL signals
+- **OLD LOGIC**: Entry logic: `poly_prob > 0.80` AND `spread < 5%` (call-buying, pending rewrite)
+- Generates BUY/HOLD/SELL signals for single-leg calls
+- **Pending**: Rewrite for VRP premium selling (iron condors, credit spreads)
 - **Limitation**: Logs only, doesn't execute or persist
 - Tests: GeneratesSignalOnHighProbability, RejectsWideSpread
 
@@ -78,44 +79,45 @@ Polymarket WSS → PolymarketClient → EventBus → MarketDataAggregator → St
 
 ### Critical (Blocking Phase 1)
 
-**1. Risk Manager** ⚠️ **TOP PRIORITY**
-- Position sizing (Kelly criterion)
-- Daily loss limits (halt at -X%)
-- Max positions per ticker
-- Order validation
+**1. VRP Premium Selling Backtest** ⚠️ **TOP PRIORITY**
+- Rewrite QuantConnect strategy for iron condors / credit spreads
+- Validate VRP + Polymarket timing thesis
+- Target: Sharpe > 0.8, max DD < 20%, win rate > 65%
+- **Impact**: Must validate before building more infrastructure
+- **Effort**: 2-3 days
+
+**2. StrategyEngine Rewrite**
+- Replace call-buying logic with premium selling signals
+- Multi-leg spread evaluation (iron condors, credit spreads)
+- IV percentile + poly certainty + divergence filters
+- **Impact**: Core strategy logic is outdated
+- **Effort**: 2-3 days
+
+**3. Risk Manager**
+- Position sizing (max loss per spread, not notional)
+- Daily/weekly loss limits (-2% daily, -4% weekly, -15% kill switch)
+- Max 3 positions per underlying, 15% total exposure
+- Order validation for multi-leg spreads
 - Kill switch logic
 - **Impact**: Cannot execute any trades safely
 - **Effort**: 2-3 days
 
-**2. Order Execution Flow**
-- RiskManager validates Signal → creates Order
-- Order sent to IBKRClient
+**4. Order Execution Flow**
+- RiskManager validates SpreadSignal → creates multi-leg Order
+- Order sent to IBKRClient (combo orders)
 - Track fills, handle rejections
 - Write to trades table
 - **Impact**: Cannot execute trades
 - **Effort**: 1-2 days
 
-**3. Data Persistence**
+**5. Data Persistence**
 - Write signals to database
 - Write trades to database
 - Write market data (optional for Phase 1)
 - **Impact**: No historical record
 - **Effort**: 1 day
 
-**4. IBKR Paper Account** (User Action Required)
-- Sign up at interactivebrokers.com
-- Configure credentials
-- Test connection
-- **Impact**: Cannot test live trading
-- **Effort**: 1 day (mostly waiting)
-
 ### Important (Phase 1 Nice-to-Have)
-
-**5. ML Model Integration**
-- Load ONNX model
-- Feature engineering
-- Signal strength prediction
-- **Can defer**: Simple threshold strategy works for Phase 1
 
 **6. Polymarket Market Discovery**
 - REST API to find MAG7-related markets
@@ -205,10 +207,10 @@ docker-compose exec engine ./cmake-build-debug-docker/polyquant_tests
 
 | Criterion | Progress | Blocker |
 |-----------|----------|---------|
-| Sharpe Ratio > 1.0 | 0% | Need 100 trades first |
+| Sharpe Ratio > 0.8 | 0% | Need 100 trades first |
 | 100+ trades | 0/100 | Risk Manager needed |
-| Win rate ±10% of signal strength | 0% | ML model or more data |
-| Max drawdown < 8% | 0% | Need live trading |
+| Win rate > 65% | 0% | Need backtest + live data |
+| Max drawdown < 20% | 0% | Need live trading |
 | Zero unhandled exceptions | ~90% | Good error handling exists |
 
 **Estimated time to Phase 1 complete**: 2-3 weeks
@@ -217,72 +219,52 @@ docker-compose exec engine ./cmake-build-debug-docker/polyquant_tests
 
 ## Next Actions (Priority Order)
 
-### **NEW: QuantConnect Backtesting (HIGHEST PRIORITY)**
+### 1. VRP Premium Selling Backtest (HIGHEST PRIORITY)
 
-**Decision**: Use QuantConnect platform for backtesting instead of collecting historical data manually.
+**Decision**: Rewrite QuantConnect strategy for VRP premium selling before building more C++ infrastructure.
 
-**Why**:
-- Free tier includes US equity options + Brain Sentiment data
-- Institutional-grade historical data (no collection needed)
-- Realistic slippage/costs built-in
-- Unlimited backtests
-- Faster validation (days vs weeks)
+**Strategy Pivot**: From call-buying on high sentiment to premium selling (iron condors, credit spreads) with Polymarket timing.
 
 **Steps**:
-1. **Run QuantConnect Backtest** (1-2 days)
-   - Upload `quantconnect/main.py` to QuantConnect.com
-   - Run 1-year backtest (2023)
-   - Target: Sharpe > 1.0, Win Rate > 55%, Max DD < 15%
-   - Files: `quantconnect/main.py`, `quantconnect/README.md`
+1. **Rewrite QuantConnect Backtest** (2-3 days)
+   - Replace `quantconnect/main.py` with VRP premium selling logic
+   - Iron condors when neutral, credit spreads when directional
+   - Target: Sharpe > 0.8, Win Rate > 65%, Max DD < 20%
 
 2. **Analyze Results & Tune** (1 day)
    - Review backtest metrics
-   - Optimize thresholds (sentiment, IV divergence)
-   - Walk-forward validation (H1 train, H2 test)
+   - Optimize IV percentile, certainty, and divergence thresholds
+   - Walk-forward validation
 
 3. **Export Parameters to C++** (1 day)
-   - Update `StrategyEngine.cpp` with optimized thresholds
-   - Document backtest results in STATUS.md
-
-**Trade-off**: QuantConnect uses Brain Sentiment (not Polymarket), but it's a reasonable proxy for forward-looking sentiment.
+   - Document optimal parameters for StrategyEngine rewrite
 
 ---
 
-### Then: Risk & Execution (if backtest successful)
+### 2. Bug Fixes & Known Issues
 
-4. **Implement Risk Manager** (2-3 days)
-   - Files: `include/polyquant/risk/RiskManager.h`, `src/cpp/risk/RiskManager.cpp`
-   - Tests: `tests/test_risk_manager.cpp`
-   - Config: `config/risk_params.yaml`
+- Fix hardcoded test markets in PolymarketClient
+- Add WebSocket reconnection logic
+- Add graceful shutdown (SIGTERM handler)
 
-5. **Set up IBKR Paper Account** (1 day)
-   - Sign up and wait for approval
-   - Configure credentials in `.env`
-   - Test connection
+### 3. StrategyEngine Rewrite
 
-6. **Implement Order Execution** (1-2 days)
-   - Signal → RiskManager → Order → IBKR
-   - Handle fills and rejections
+- Replace call-buying logic with VRP premium selling
+- Multi-leg spread signal generation
+- IV percentile + poly certainty + divergence evaluation
+- Files: `src/cpp/core/StrategyEngine.cpp`, `include/polyquant/core/StrategyEngine.h`
 
-### Then: Persistence & Testing
+### 4. Risk Manager Implementation
 
-7. **Database Integration** (1 day)
-   - Write signals to DB
-   - Write trades to DB
-   - Query helpers
+- Files: `include/polyquant/risk/RiskManager.h`, `src/cpp/risk/RiskManager.cpp`
+- Tests: `tests/test_risk_manager.cpp`
+- Multi-leg spread validation, exposure limits, circuit breakers
 
-8. **Integration Tests** (1 day)
-   - End-to-end signal → order → fill
-   - Mock IBKR responses
-   - WebSocket reconnection
+### Then: Execution & Persistence
 
-### Then: Live Paper Trading
-
-9. **Run Paper Trading** (1-2 weeks)
-   - Monitor for bugs
-   - Collect 100 trades
-   - Calculate metrics
-   - Compare vs QuantConnect backtest
+5. **Order Execution** — Multi-leg combo orders via IBKR
+6. **Database Integration** — Write signals and trades
+7. **Paper Trading** — Collect 100+ trades, validate against backtest
 
 ---
 
@@ -333,11 +315,12 @@ docker-compose logs -f engine
 
 ## Technical Debt
 
-1. **Lock-based EventBus** - May be bottleneck at high frequency (defer to Phase 2)
-2. **Synchronous database writes** - Will block event loop (add batching)
-3. **No rate limiting** - Could hit API limits (add before Phase 1 exit)
-4. **Hardcoded market IDs** - Need dynamic discovery (medium priority)
-5. **No metrics export** - Add Prometheus before Phase 2
+1. **StrategyEngine implements old call-buying logic** - Needs full rewrite for VRP premium selling
+2. **Lock-based EventBus** - May be bottleneck at high frequency (defer to Phase 2)
+3. **Synchronous database writes** - Will block event loop (add batching)
+4. **No rate limiting** - Could hit API limits (add before Phase 1 exit)
+5. **Hardcoded market IDs** - Need dynamic discovery (medium priority)
+6. **No metrics export** - Add Prometheus before Phase 2
 
 ---
 

@@ -75,7 +75,7 @@ Welcome to the PolyQuant documentation. This guide will help you understand, bui
 |-----------|-----------|---------------|
 | **Core Engine** | C++20 | [ARCHITECTURE.md](ARCHITECTURE.md#level-3-component-diagram) |
 | **Pricing** | Black-Scholes | [MATH_SPECS.md](MATH_SPECS.md) |
-| **ML Model** | XGBoost → ONNX | [TRADING_STRATEGY.md](TRADING_STRATEGY.md#ml-model) |
+| **Signal Engine** | Rule-based (ML Phase 2+) | [TRADING_STRATEGY.md](TRADING_STRATEGY.md#entry-criteria) |
 | **Database** | PostgreSQL + TimescaleDB | [DATABASE_SCHEMA.md](DATABASE_SCHEMA.md) |
 | **Data Feeds** | Polymarket + IBKR | [API_INTEGRATION.md](API_INTEGRATION.md) |
 | **Deployment** | Docker + AWS EC2 | [DEPLOYMENT.md](DEPLOYMENT.md) |
@@ -121,7 +121,7 @@ Quick summary:
 - Phase 1 (~50% complete)
 - Live Polymarket data flowing
 - 14/14 tests passing
-- **Next: QuantConnect backtesting** (see [../quantconnect/](../quantconnect/))
+- **Next: VRP premium selling backtest** (see [../quantconnect/](../quantconnect/))
 - Risk Manager after backtest validation
 
 ---

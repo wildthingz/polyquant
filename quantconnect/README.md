@@ -1,6 +1,6 @@
 # PolyQuant - QuantConnect Implementation
 
-Backtesting our sentiment-driven options strategy on QuantConnect platform.
+Backtesting our VRP premium selling strategy (iron condors, credit spreads) on QuantConnect platform, using sentiment data as a timing signal.
 
 ## Why QuantConnect?
 
@@ -44,30 +44,41 @@ Both capture forward-looking sentiment that may not be fully priced into IV
 
 ## Strategy Implementation
 
+**NOTE**: `main.py` currently implements the OLD call-buying strategy. It needs to be rewritten for VRP premium selling.
+
+### Target Trade Types
+- **Iron Condor**: When sentiment is neutral (poly_prob 40-60%)
+- **Put Credit Spread**: When sentiment is bullish (poly_prob > 60%)
+- **Call Credit Spread**: When sentiment is bearish (poly_prob < 40%)
+
 ### Entry Criteria
 ```python
-1. Sentiment Score > 0.70 (high confidence)
-2. IV Percentile: 50-90 (elevated but not extreme)
-3. Divergence: sentiment - normalized_iv > 0.10
-4. Delta: 0.20 - 0.80 (avoid deep OTM/ITM)
-5. Spread < 5%
-6. DTE: 7-60 days
+1. IV Percentile > 50 (elevated premium to sell)
+2. Polymarket Certainty > 70% (crowd is confident)
+3. Divergence > 10% (IV overpricing vs sentiment)
+4. Short strike delta ~ 0.20, long strike delta ~ 0.08
+5. Spread < 5% (all legs)
+6. DTE: 7-45 days
+7. Credit-to-width ratio > 30%
 ```
 
 ### Exit Rules
 ```python
-- Take Profit: +50% gain
-- Stop Loss: -30% loss
+- Take Profit: 50% of max credit captured
+- Stop Loss: Spread value doubles (2x credit)
 - Theta Burn: 1 DTE remaining
-- Liquidity: Spread > 8%
+- Post-event IV crush: Close after event resolves
+- Liquidity: Any leg spread > 8%
 ```
 
 ### Risk Management
 ```python
-- Max position size: 5% per trade
+- Max position size: 5% per trade (based on max loss)
+- Max 3 positions per underlying
 - Max sector exposure: 15% (all MAG7)
 - Daily loss limit: -2%
-- Daily trade limit: 10 trades
+- Weekly loss limit: -4% (reduce sizes)
+- Kill switch: -15% drawdown
 ```
 
 ## Getting Started
@@ -90,11 +101,11 @@ Both capture forward-looking sentiment that may not be fully priced into IV
 
 ### 4. Analyze Results
 **Minimum targets to proceed to live trading**:
-- Sharpe Ratio > 1.0
-- Total Return > 15%
-- Max Drawdown < 15%
-- Win Rate > 55%
-- Profit Factor > 1.5
+- Sharpe Ratio > 0.8
+- Total Return > 12% annualized
+- Max Drawdown < 20%
+- Win Rate > 65%
+- Profit Factor > 1.3
 
 ## File Structure
 
@@ -152,36 +163,38 @@ self.universe = self.AddUniverseSelection(
 
 ## Expected Results
 
-**Conservative Estimates** (based on similar sentiment strategies):
-- Sharpe Ratio: 1.2 - 1.8
-- Annual Return: 20-40%
-- Win Rate: 55-65%
-- Max Drawdown: 10-15%
-- Avg Trade Duration: 3-5 days
+**Conservative Estimates** (based on VRP premium selling strategies):
+- Sharpe Ratio: 0.8 - 1.2
+- Annual Return: 12-18%
+- Win Rate: 65-75%
+- Max Drawdown: 15-20%
+- Avg Trade Duration: 10-25 days
 
-**If Sharpe < 1.0**:
-- Sentiment proxy may not correlate with Polymarket
-- Need tighter entry criteria (higher divergence threshold)
-- Consider other alternative data (Quiver WallStreetBets, etc.)
+**If Sharpe < 0.8**:
+- IV percentile threshold may need adjustment
+- Polymarket certainty threshold may be too low
+- Credit-to-width ratio filter may need tightening
+- Consider tighter strike selection (higher delta for short legs)
 
 ## Integration with C++ Engine
 
 After successful backtest:
 
 1. **Export Parameters**
-   - Optimal thresholds (sentiment, IV percentile, divergence)
-   - Position sizing (Kelly fraction)
-   - Exit triggers
+   - Optimal thresholds (IV percentile, certainty, divergence)
+   - Strike selection rules (delta targets)
+   - Exit triggers and position sizing
 
-2. **Implement in C++**
-   - Update `StrategyEngine.cpp` with tuned parameters
-   - Add sentiment data feed (if available)
+2. **Rewrite StrategyEngine in C++**
+   - Replace call-buying logic with multi-leg spread evaluation
+   - Implement iron condor / credit spread signal generation
+   - Add IV percentile calculation
    - Test in paper trading (Phase 1)
 
 3. **Monitor Divergence**
    - Compare QuantConnect backtest vs live results
-   - Track slippage difference
-   - Adjust for execution quality
+   - Track multi-leg fill quality and slippage
+   - Adjust for execution quality on combo orders
 
 ## Running the Backtest
 
@@ -213,9 +226,9 @@ lean backtest "PolyQuant"
 Before proceeding to C++ live implementation:
 
 ✅ **Performance**:
-- Sharpe > 1.0
-- Max DD < 15%
-- Win rate > 55%
+- Sharpe > 0.8
+- Max DD < 20%
+- Win rate > 65%
 
 ✅ **Statistical Significance**:
 - 100+ trades in backtest

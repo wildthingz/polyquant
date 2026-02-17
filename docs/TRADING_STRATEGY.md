@@ -1,29 +1,32 @@
 # Trading Strategy & Logic
 
-Complete specification of PolyQuant's trading strategy, including entry/exit logic, Greeks usage, risk management, and position sizing.
+Complete specification of PolyQuant's VRP (Volatility Risk Premium) premium selling strategy, using Polymarket prediction market data as a timing signal.
 
 ## Table of Contents
 
 1. [Strategy Overview](#strategy-overview)
 2. [Target Universe](#target-universe)
-3. [The Greeks](#the-greeks)
-4. [Entry Criteria](#entry-criteria)
-5. [Position Management](#position-management)
-6. [Exit Logic](#exit-logic)
-7. [Risk Management](#risk-management)
-8. [ML Model](#ml-model)
+3. [Trade Types](#trade-types)
+4. [The Greeks](#the-greeks)
+5. [Entry Criteria](#entry-criteria)
+6. [Position Management](#position-management)
+7. [Exit Logic](#exit-logic)
+8. [Risk Management](#risk-management)
+9. [Edge Analysis](#edge-analysis)
 
 ---
 
 ## Strategy Overview
 
-**Core Thesis**: Polymarket probabilities serve as a forward-looking sentiment gauge that can identify IV mispricing in options markets before broader participants react.
+**Core Thesis**: Sell options premium when implied volatility is elevated, using Polymarket probabilities as a timing signal to identify when event uncertainty is overpriced relative to likely outcomes.
 
-**Strategy Type**: Mean reversion on implied volatility with directional sentiment overlay
+**Strategy Type**: Volatility Risk Premium (VRP) harvesting with Polymarket timing overlay
 
-**Holding Period**: 1-7 days (average ~3 days)
+**Holding Period**: 7-45 days (average ~21 days)
 
-**Direction**: Long options only (calls when bullish sentiment, puts when bearish)
+**Direction**: Sell premium, not buy direction. We are net short volatility, collecting theta decay as our primary profit driver.
+
+**Target**: 12-18% annualized return, Sharpe ~0.8, max drawdown < 20%
 
 ---
 
@@ -49,73 +52,134 @@ Complete specification of PolyQuant's trading strategy, including entry/exit log
 
 ---
 
+## Trade Types
+
+### Iron Condor (Neutral — poly_prob 40-60%)
+
+When Polymarket signals uncertainty (no strong directional lean), sell both sides.
+
+```
+Sell Put Credit Spread (below)  +  Sell Call Credit Spread (above)
+
+Example: NVDA @ $500
+  Sell 480 Put / Buy 470 Put  (put credit spread)
+  Sell 520 Call / Buy 530 Call (call credit spread)
+  Net credit: ~$3.50
+  Max loss: $6.50 per spread
+  Max profit: $3.50 (if NVDA stays between 480-520 at expiry)
+```
+
+### Put Credit Spread (Bullish — poly_prob > 60%)
+
+When Polymarket signals bullish outcome, sell downside premium.
+
+```
+Sell OTM Put + Buy further OTM Put (protection)
+
+Example: AAPL @ $200, Polymarket "AAPL beats earnings" = 75%
+  Sell 190 Put (~0.20 delta) / Buy 185 Put (~0.08 delta)
+  Net credit: ~$1.50
+  Max loss: $3.50
+  Thesis: Market pricing too much downside risk given bullish sentiment
+```
+
+### Call Credit Spread (Bearish — poly_prob < 40%)
+
+When Polymarket signals bearish outcome, sell upside premium.
+
+```
+Sell OTM Call + Buy further OTM Call (protection)
+
+Example: TSLA @ $300, Polymarket "TSLA hits $400" = 25%
+  Sell 320 Call (~0.20 delta) / Buy 325 Call (~0.08 delta)
+  Net credit: ~$1.80
+  Max loss: $3.20
+  Thesis: Market pricing too much upside given bearish sentiment
+```
+
+### Trade Type Selection
+
+| Polymarket Signal | poly_prob | Trade Type |
+|-------------------|-----------|------------|
+| Strong bullish | > 70% | Put Credit Spread |
+| Mild bullish | 60-70% | Put Credit Spread (tighter wings) |
+| Neutral / uncertain | 40-60% | Iron Condor |
+| Mild bearish | 30-40% | Call Credit Spread (tighter wings) |
+| Strong bearish | < 30% | Call Credit Spread |
+
+---
+
 ## The Greeks
 
-### Delta (Δ): Direction & Hedge Ratio
+### Delta ($\Delta$): Direction & Position Risk
 
 **Definition**: $\frac{\partial V}{\partial S}$ - Rate of change of option price w.r.t. underlying
 
-**Usage**:
-- **Entry Filter**: Only trade 0.20 < Delta < 0.80
-  - Avoids deep OTM (low probability of profit)
-  - Avoids deep ITM (poor capital efficiency)
-- **Position Monitoring**: Track delta to estimate P&L sensitivity
-- **NOT used as probability**: Common mistake - delta ≠ probability of ITM
+**Usage in Premium Selling**:
+- **Short Strike Selection**: Target ~0.20 delta for short legs (80% probability of expiring OTM)
+- **Long Strike Selection**: Target ~0.08 delta for long legs (protection wings)
+- **Position Delta**: Near-zero for iron condors, slightly directional for credit spreads
+- **Monitoring**: Track net delta to ensure positions aren't becoming too directional
 
 **Example**:
 ```
-NVDA @ $500, buying 520 Call @ $15
-Delta = 0.45
-Expected P&L for $1 move in NVDA: 0.45 × 100 = $45
+Iron Condor on NVDA @ $500:
+  Short 480 Put: delta = -0.20
+  Long 470 Put:  delta = -0.08
+  Short 520 Call: delta = +0.20 (short call has negative delta for seller)
+  Long 530 Call:  delta = +0.08
+  Net delta: ~0.00 (market neutral)
 ```
 
-### Gamma (Γ): Convexity Risk
+### Gamma ($\Gamma$): Convexity Risk
 
 **Definition**: $\frac{\partial^2 V}{\partial S^2}$ - Rate of change of delta
 
-**Usage**:
-- **Risk Monitor**: High gamma = delta changes rapidly
-- **ATM options have highest gamma**: Monitor during volatile events
-- **No explicit entry filter**: Managed via delta range (0.20-0.80)
+**Usage in Premium Selling**:
+- **We are short gamma**: Large underlying moves hurt us
+- **Risk Monitor**: High gamma = position delta changes rapidly on moves
+- **DTE Effect**: Gamma increases as expiration approaches — close positions before last 7 days to avoid gamma risk acceleration
 
-### Vega (ν): IV Sensitivity (Primary Profit Driver)
+### Vega ($\nu$): IV Sensitivity — We're Short Vega
 
 **Definition**: $\frac{\partial V}{\partial \sigma}$ - Sensitivity to implied volatility
 
 **Strategy**:
-- **Mean Reversion Bet**: Buy when IV is elevated but Polymarket signals calm
-- **Entry Sweet Spot**: IV Percentile 50-70 (elevated but not extreme)
-- **Avoid**: IV Percentile > 90 (fear pricing, mean reversion likely against us)
+- **We are short vega**: We profit when IV decreases (IV crush)
+- **Entry Sweet Spot**: IV Percentile > 50 (sell when IV is elevated)
+- **Best Scenario**: Sell premium before known event, collect credit as IV crushes post-event
+- **Avoid**: IV Percentile < 30 (not enough premium to sell)
 
 **Example**:
 ```
-AAPL option: IV = 35% (65th percentile)
-Polymarket: "AAPL earnings beat" = 75% (high confidence)
-→ Market pricing uncertainty, but sentiment shows confidence
-→ BUY signal (expect IV crush post-event)
+AAPL pre-earnings: IV = 45% (80th percentile)
+Polymarket: "AAPL beats earnings" = 75% (high confidence)
+-> Market pricing high uncertainty, but sentiment shows confidence
+-> SELL premium (expect IV crush post-earnings)
+-> IV drops to 25% post-earnings -> spreads lose value -> we keep credit
 ```
 
-### Theta (Θ): Time Decay Cost
+### Theta ($\Theta$): Time Decay — Our Friend
 
-**Definition**: $\frac{\partial V}{\partial t}$ - Daily time decay (always negative for long options)
+**Definition**: $\frac{\partial V}{\partial t}$ - Daily time decay
 
-**Usage**:
-- **Expected Value Check**: Must satisfy `EV > abs(Theta × Expected_Days_Held)`
-- **Acceleration Monitor**: Theta accelerates in final 7 days → exit by day 7 or 1 day before expiry
-- **Daily Cost**: Factor into position sizing
+**Usage in Premium Selling**:
+- **Theta is positive for us**: As time passes, sold options lose value — we profit
+- **Theta is our primary profit driver**: We want time to pass uneventfully
+- **DTE Sweet Spot**: 30-45 DTE at entry — theta acceleration kicks in during our hold period
+- **Daily Income**: Each day, our short options decay, bringing us closer to max profit
 
 **Example**:
 ```
-Option premium: $10
-Theta: -$0.15/day
-Expected hold: 3 days
-Cost: 0.15 × 3 = $0.45 (4.5% of premium)
-→ Required edge must exceed 4.5% to be profitable
+Put credit spread sold for $2.00 credit
+Combined theta: +$0.05/day
+After 20 days of no movement: ~$1.00 of time decay collected
+-> Close at 50% profit ($1.00 remaining value)
 ```
 
-### Rho (ρ): Interest Rate Risk
+### Rho ($\rho$): Interest Rate Risk
 
-**Ignored**: Short-dated options (<30 DTE) have minimal interest rate sensitivity
+**Ignored**: Short-dated options (<45 DTE) have minimal interest rate sensitivity.
 
 ---
 
@@ -123,83 +187,74 @@ Cost: 0.15 × 3 = $0.45 (4.5% of premium)
 
 ### Primary Filters (ALL must pass)
 
-#### 1. Event Timing
+#### 1. IV Percentile Check
 ```
-Condition: event_date >= option_expiry - 1 day
-       AND event_date <= option_expiry + 7 days
+Condition: iv_percentile > 50
 ```
-- Ensures event occurs before option expires (with 1-day buffer)
-- Allows event resolution to impact price
+- Ensures sufficient premium to sell
+- Higher IV = wider credit received = better risk/reward
 
-#### 2. ML Signal Strength
+#### 2. Polymarket Certainty
 ```
-Condition: signal_strength > 0.80
+Condition: poly_certainty > 70%
+Where: poly_certainty = max(poly_prob, 1 - poly_prob)
 ```
-- XGBoost model output (calibrated probability)
-- Threshold tuned for ~65% win rate
+- Polymarket must show conviction in some direction
+- Certainty > 70% means the crowd is confident — we sell the opposite side's premium
 
-#### 3. Liquidity Gate
+#### 3. Sentiment-IV Divergence
+```
+Condition: divergence > 10%
+Where: divergence = poly_certainty - (1 - iv_percentile/100)
+```
+- The market (IV) prices uncertainty, but Polymarket shows confidence
+- Divergence = the gap we exploit
+
+#### 4. Liquidity Gate
 ```
 Condition: (ask - bid) / mid < 0.05
 ```
-- Ensures tight spreads (<5%)
+- Tight spreads (<5%) on all legs
 - Validates during entry AND continuously while holding
 
-#### 4. Delta Range
+#### 5. DTE Range
 ```
-Condition: 0.20 < delta < 0.80
+Condition: 7 <= days_to_expiry <= 45
 ```
-- Avoids lottery tickets (deep OTM)
-- Avoids capital-inefficient deep ITM
+- Minimum 7 DTE to avoid gamma risk
+- Maximum 45 DTE for capital efficiency
+
+#### 6. Short Strike Delta
+```
+Condition: short_strike_delta ~ 0.20
+         long_strike_delta ~ 0.08
+```
+- Short strikes at ~0.20 delta (1 standard deviation OTM)
+- Long strikes at ~0.08 delta (protection, defines max loss)
 
 ### Risk-Adjusted Filters
 
-#### 5. Expected Value Check
-```python
-EV = (win_prob × avg_profit) - (loss_prob × avg_loss) - (abs(theta) × expected_days_held)
-
-Where:
-  win_prob = signal_strength
-  loss_prob = 1 - signal_strength
-  avg_profit = 0.50 (50% take profit target)
-  avg_loss = 0.30 (30% stop loss)
-  expected_days_held = min(days_to_expiry, 7)
-
-Condition: EV > 0.10 (10% minimum expected return)
+#### 7. Credit-to-Width Ratio
 ```
-
-**Example Calculation**:
+Condition: credit_received / spread_width > 0.30
 ```
-signal_strength = 0.85
-EV = (0.85 × 0.50) - (0.15 × 0.30) - (0.05 × 3)
-   = 0.425 - 0.045 - 0.15
-   = 0.23 (23% expected return)
-→ PASS (exceeds 10% threshold)
-```
+- Must receive at least 30% of the spread width as credit
+- Ensures favorable risk/reward (e.g., $1.50 credit on $5 wide spread)
 
-#### 6. Position Sizing (Kelly Criterion)
-```python
-kelly_fraction = (win_prob × avg_profit - loss_prob × avg_loss) / avg_loss
-
-Position_size = kelly_fraction × kelly_fraction_multiplier × account_value
-Position_size = min(Position_size, 0.05 × account, available_sector_capacity)
-
-Where:
-  kelly_fraction_multiplier = 0.25 (use 1/4 Kelly for safety)
-  available_sector_capacity = 0.15 × account - current_mag7_exposure
+#### 8. Sector Exposure
 ```
-
-#### 7. Sector Exposure
+Condition: sum(open_mag7_positions) < 3 per underlying
+       AND total_exposure < 15% of account
 ```
-Condition: sum(open_mag7_positions) < 0.15 × account_value
-```
+- Max 3 open positions per ticker
 - Prevents concentration risk (all Mag 7 are correlated)
 
-#### 8. IV Percentile Context
+#### 9. Position Sizing
 ```
-Preferred: 50 < IV_percentile < 70 (elevated but not extreme)
-Avoid: IV_percentile > 90 (fear pricing)
+Position_size = min(0.05 * account_value, available_capacity)
 ```
+- Max 5% of account per trade
+- Based on max loss (spread width - credit received), not notional
 
 ---
 
@@ -207,18 +262,18 @@ Avoid: IV_percentile > 90 (fear pricing)
 
 ### Entry Execution
 
-**Order Type**: Limit order
-**Price**: Mid-to-Ask (start at mid, walk up to ask over 60 seconds)
+**Order Type**: Limit order (credit)
+**Price**: Mid price, walk down to natural over 60 seconds
 **Time in Force**: DAY
-**Quantity**: Calculated from Kelly sizing, rounded to integer contracts
+**Legs**: Multi-leg spread order (not individual legs)
 
 **Entry Algorithm**:
 ```
-1. Calculate position size (Kelly formula)
-2. Place limit order at mid price
-3. If not filled in 30 seconds, reprice to (mid + ask) / 2
-4. If not filled in 60 seconds, reprice to ask
-5. If not filled at ask, CANCEL (spread likely widening)
+1. Calculate spread parameters (strikes, width)
+2. Place multi-leg limit order at mid credit
+3. If not filled in 30 seconds, reduce credit by $0.05
+4. If not filled in 60 seconds, reduce to natural
+5. If not filled at natural, CANCEL (spread too competitive)
 ```
 
 ---
@@ -227,104 +282,55 @@ Avoid: IV_percentile > 90 (fear pricing)
 
 ### Exit Triggers (First to Fire Wins)
 
-```mermaid
-stateDiagram-v2
-    [*] --> MONITORING: Position Opened
-
-    MONITORING --> TAKE_PROFIT: PnL ≥ +50%
-    MONITORING --> STOP_LOSS: PnL ≤ -30%
-    MONITORING --> SIGNAL_REVERSAL: ML signal drops < 0.3
-    MONITORING --> THETA_BURN: Days to Expiry ≤ 1
-    MONITORING --> LIQUIDITY_CRISIS: Spread > 8%
-    MONITORING --> POLYMARKET_SHIFT: Poly prob reverses >20%
-    MONITORING --> TIME_SCALING: Held >3 days & underwater
-
-    TAKE_PROFIT --> [*]: Close at Limit (mid-to-bid)
-    STOP_LOSS --> [*]: Close at Market
-    SIGNAL_REVERSAL --> [*]: Close at Limit
-    THETA_BURN --> [*]: Close at Market
-    LIQUIDITY_CRISIS --> PARTIAL_EXIT: Reduce 50%
-    POLYMARKET_SHIFT --> TRAILING_STOP: Tighten to -15%
-    TIME_SCALING --> MONITORING: Reduce 25%
-
-    PARTIAL_EXIT --> MONITORING
-    TRAILING_STOP --> MONITORING
+#### 1. Take Profit: 50% of Max Credit
 ```
+Trigger: spread_value <= 0.50 * initial_credit
+Action: Place limit order to buy back spread at 50% of credit
+Rationale: Capture half the premium, free up capital for next trade
+```
+This is the primary exit. Most winning trades close here in 10-25 days.
 
-### Detailed Exit Rules
+#### 2. Stop Loss: Spread Value Doubles (2x)
+```
+Trigger: spread_value >= 2.0 * initial_credit
+Action: Market order to close
+Rationale: Cut losses before they compound
+```
+Example: Sold spread for $1.50, close if spread value reaches $3.00.
 
-#### 1. Take Profit (+50%)
-```
-Trigger: unrealized_pnl_pct >= 0.50
-Action: Place limit order at mid-to-bid price
-Timeout: If not filled in 60 seconds, accept bid
-```
-
-#### 2. Stop Loss (-30%)
-```
-Trigger: unrealized_pnl_pct <= -0.30
-Action: Market order (immediate)
-Rationale: Protect capital, don't wait for recovery
-```
-
-#### 3. ML Signal Reversal
-```
-Trigger: Re-evaluate signal every hour
-         IF new_signal_strength < 0.30 THEN exit
-Action: Limit order at mid price
-Timeout: If not filled in 60 seconds, market order
-```
-
-#### 4. Theta Acceleration
+#### 3. Theta Burn: 1 DTE Remaining
 ```
 Trigger: days_to_expiry <= 1
-Action: Market order
-Rationale: Theta decay overwhelms any directional edge
+Action: Market order to close all legs
+Rationale: Gamma risk too high near expiration, avoid assignment risk
+```
+
+#### 4. Post-Event IV Crush
+```
+Trigger: event_resolved AND iv_drop > 20%
+Action: Close at limit (IV has crushed, most profit captured)
+Rationale: The trade thesis has played out — take profits
 ```
 
 #### 5. Liquidity Deterioration
 ```
-Trigger: Current spread > 8%
-Action: 
-  - Reduce position by 50% at market
-  - Hold remainder IF signal still valid (>0.8)
-  - Full exit if spread > 12%
-Rationale: Preserve capital, avoid trapped positions
-```
-
-#### 6. Polymarket Sentiment Reversal
-```
-Trigger: Polymarket probability shifts >20% against position
-         Example: Was 75% bullish, now 55%
+Trigger: any_leg_spread > 8%
 Action:
-  - Tighten stop-loss from -30% to -15%
-  - Give 30 minutes for recovery
-  - If no recovery, exit at market
-```
-
-#### 7. Time-Weighted Scaling
-```
-Trigger: position_held > 3 days AND unrealized_pnl < 0
-Action: Reduce position by 25% daily
-Rationale: Cut losers gradually, avoid holding dead positions
+  - If profitable: Close at limit
+  - If losing: Reduce by 50% at market, hold rest
+  - If all legs spread > 12%: Full exit at market
+Rationale: Preserve capital, avoid trapped positions
 ```
 
 ### Market Event Overrides
 
 **Halts/Circuit Breakers**:
 ```
-Action: 
+Action:
   - Cancel all working orders immediately
   - DO NOT attempt to close existing positions
   - Wait for trading to resume
   - Re-evaluate all positions when market reopens
-```
-
-**Earnings Announcements (Unexpected)**:
-```
-If event_date NOT in calendar:
-  IF profitable: Close immediately pre-market
-  ELSE: Hold through announcement (already losing, may benefit from surprise)
 ```
 
 **IBKR Gateway Restart**:
@@ -332,7 +338,7 @@ If event_date NOT in calendar:
 Action:
   - Enter "safe mode"
   - Cancel new order submissions
-  - Maintain existing positions
+  - Maintain existing positions (spreads have defined risk)
   - Resume normal operation after reconnection confirmed
 ```
 
@@ -344,37 +350,47 @@ Action:
 
 ```c++
 class RiskManager {
-  bool approve_order(const Order& order) {
-    // 1. Position size check
-    if (order.value > 0.05 * account_value) {
-      log_rejection("Single position exceeds 5%");
+  bool approve_order(const SpreadOrder& order) {
+    // 1. Position size check (based on max loss)
+    if (order.max_loss > 0.05 * account_value) {
+      log_rejection("Single position max loss exceeds 5%");
       return false;
     }
 
-    // 2. Sector exposure check
-    double mag7_exposure = calculate_mag7_exposure();
-    if (mag7_exposure + order.value > 0.15 * account_value) {
-      log_rejection("Sector exposure would exceed 15%");
+    // 2. Per-underlying limit
+    int positions_for_ticker = count_positions(order.underlying);
+    if (positions_for_ticker >= 3) {
+      log_rejection("Max 3 positions per underlying");
       return false;
     }
 
-    // 3. Daily loss check
+    // 3. Total sector exposure check
+    double total_exposure = calculate_total_exposure();
+    if (total_exposure + order.max_loss > 0.15 * account_value) {
+      log_rejection("Total exposure would exceed 15%");
+      return false;
+    }
+
+    // 4. Daily loss check
     if (daily_pnl_pct < -0.02) {
       log_rejection("Daily loss limit reached (-2%)");
       halt_trading();
       return false;
     }
 
-    // 4. Spread check
-    if (order.spread_pct > 0.05) {
-      log_rejection("Spread exceeds 5%");
+    // 5. Weekly loss check
+    if (weekly_pnl_pct < -0.04) {
+      log_rejection("Weekly loss limit reached (-4%)");
+      reduce_position_sizes();
       return false;
     }
 
-    // 5. Daily trade limit
-    if (today_trade_count >= 10) {
-      log_rejection("Daily trade limit reached (10)");
-      return false;
+    // 6. Spread check (all legs)
+    for (const auto& leg : order.legs) {
+      if (leg.spread_pct > 0.05) {
+        log_rejection("Leg spread exceeds 5%");
+        return false;
+      }
     }
 
     return true;
@@ -385,10 +401,28 @@ class RiskManager {
 ### Continuous Monitoring
 
 **Position Monitoring (Every Tick)**:
-- Update unrealized P&L
-- Check stop-loss triggers
-- Monitor spread widening
-- Calculate current theta burn
+- Update unrealized P&L for all spreads
+- Check stop-loss triggers (spread value 2x)
+- Monitor individual leg liquidity
+- Track net portfolio delta
+
+**Loss Circuit Breakers**:
+```
+Daily loss >= -2%:
+  - HALT all new trades for the day
+  - Keep existing positions (defined risk)
+  - Send alert
+
+Weekly loss >= -4%:
+  - REDUCE position sizes by 50% for next week
+  - Close any positions at breakeven or better
+  - Send critical alert
+
+Account drawdown >= -15%:
+  - KILL SWITCH: Close ALL positions
+  - Halt trading indefinitely
+  - Require manual review and restart
+```
 
 **Kill Switch Triggers**:
 ```
@@ -396,137 +430,30 @@ Level 1 (5 seconds): Data feed lost
   Action: Stop new orders
 
 Level 2 (30 seconds): Data feed still lost
-  Action: Begin flattening positions at market
+  Action: Hold positions (spreads have defined risk)
 
 Level 3 (60 seconds): Data feed still lost
-  Action: Full system shutdown, alert operator
-```
-
-**Daily Loss Circuit Breaker**:
-```
-IF daily_pnl_pct <= -0.02:
-  - HALT all trading
-  - Close all new positions (keep existing)
-  - Send critical alert
-  - Require manual reset next day
-```
-
----
-
-## ML Model
-
-### Model Bootstrap (Cold Start)
-
-**Problem**: Need data to train model, but need model to generate data
-
-**Solution**: Transfer learning from historical data
-
-**Step 1**: Manual Data Collection (Pre-Phase 1)
-```
-Collect 90 days of historical data:
-  - Polymarket event outcomes
-  - Corresponding option prices
-  - Match events to options manually (20-30 samples)
-```
-
-**Step 2**: Label Historical Data
-```python
-def label_trade(event, option_data):
-    # Simulate: "Would this trade have been profitable?"
-    entry_price = option_data['price_at_signal']
-    exit_price = option_data['price_at_event_resolution']
-    
-    pnl_pct = (exit_price - entry_price) / entry_price
-    
-    return 1 if pnl_pct > 0.50 else 0  # Binary: hit take-profit or not
-```
-
-**Step 3**: Train Initial Model
-```python
-import xgboost as xgb
-
-# Conservative hyperparameters for small dataset
-params = {
-    'max_depth': 3,
-    'learning_rate': 0.05,
-    'n_estimators': 100,
-    'objective': 'binary:logistic'
-}
-
-model = xgb.XGBClassifier(**params)
-model.fit(X_train, y_train)
-
-# Export to ONNX
-from skl2onnx import to_onnx
-onnx_model = to_onnx(model, X_train[:1].astype(np.float32))
-```
-
-**Step 4**: Active Learning (During Phase 1)
-```
-Every 10 resolved trades:
-  - Retrain model with cumulative data
-  - Gradually lower min_signal_strength threshold:
-    * 0-20 trades: 0.85 (very conservative)
-    * 21-50 trades: 0.82
-    * 51+ trades: 0.80
-```
-
-### Model Features (10 inputs)
-
-```python
-features = [
-    'poly_prob',                # Current Polymarket probability
-    'poly_prob_change_24h',     # Δ over last 24 hours
-    'poly_volume_usd',          # Trading volume
-    'opt_delta',                # Option delta
-    'opt_iv',                   # Implied volatility
-    'opt_iv_percentile',        # IV rank (30-day)
-    'days_to_expiry',           # Time remaining
-    'spread_width_pct',         # Bid-ask spread
-    'underlying_price_change_5d', # 5-day momentum
-    'vix_level'                 # Market-wide fear gauge
-]
-```
-
-### Model Monitoring
-
-**Calibration Check**:
-```sql
--- Bin predictions and compare to actual outcomes
-SELECT 
-  FLOOR(signal_strength * 20) / 20.0 AS predicted_bucket,
-  AVG(signal_strength) AS avg_predicted,
-  AVG(CASE WHEN actual_outcome THEN 1.0 ELSE 0.0 END) AS actual_win_rate,
-  ABS(AVG(signal_strength) - AVG(CASE WHEN actual_outcome THEN 1.0 ELSE 0.0 END)) AS calibration_error
-FROM signals
-WHERE actual_outcome IS NOT NULL
-GROUP BY predicted_bucket
-HAVING COUNT(*) >= 5;
-```
-
-**Drift Detection**:
-```python
-rolling_20_win_rate = trades[-20:].win_rate()
-avg_signal_strength = trades[-20:].avg_signal_strength()
-
-if rolling_20_win_rate < (avg_signal_strength - 0.15):
-    alert("Model drift detected: predicted {avg_signal_strength}, actual {rolling_20_win_rate}")
-    review_model()
+  Action: Alert operator, positions remain (max loss is defined)
 ```
 
 ---
 
 ## Edge Analysis
 
-**Why hasn't this been arbitraged away?**
+**Why does the VRP edge exist?**
 
-1. **Infrastructure Barrier**: Retail lacks WebSocket infrastructure for Polymarket
-2. **Data Integration Complexity**: Linking prediction markets to options is non-trivial
-3. **Small Size**: Only profitable at <$10K per trade (institutions ignore)
-4. **Sentiment vs Fundamentals**: Institutions focus on earnings models, not sentiment
-5. **Alpha Decay**: Edge likely decays once Polymarket volume > $10B (currently ~$2B)
+1. **Structural VRP**: Options are systematically overpriced — implied volatility consistently exceeds realized volatility by 2-4% on average. This is a well-documented risk premium that insurance sellers collect.
+2. **Polymarket Timing**: Adds a timing overlay — sell premium specifically when Polymarket shows high certainty but IV is still elevated (pre-event). This filters out the worst entries (selling before genuinely uncertain events).
+3. **Retail Inaccessibility**: Multi-leg spreads are harder for retail traders to execute and manage. Most retail buys single-leg options (long calls/puts), providing premium for sellers.
+4. **Event-Driven IV Cycle**: Mag 7 stocks have frequent events (earnings, product launches, regulatory). Each event creates an IV ramp-up and post-event crush — a repeating cycle we exploit.
+5. **Small Size Advantage**: At <$10K per trade, we're below institutional radar. Large funds can't deploy this strategy at scale on individual names.
 
-**Expected Lifespan**: 2-3 years before mainstream adoption
+**Expected Lifespan**: 12-18 months before Polymarket/ICE launch and mainstream adoption erodes the timing edge. The structural VRP itself is permanent — only our timing advantage decays.
+
+**Alpha Thesis**:
+- VRP structural edge: ~8-10% annualized (permanent, well-documented)
+- Polymarket timing overlay: ~4-8% additional (decaying over 12-18 months)
+- Combined target: 12-18% annualized
 
 ---
 

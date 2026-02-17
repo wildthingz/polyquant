@@ -1,19 +1,19 @@
-# PolyQuant: Sentiment-Enhanced Options Trading
+# PolyQuant: VRP Premium Selling with Prediction Market Timing
 
-A high-performance, event-driven trading system that uses Polymarket prediction market data as a real-time sentiment indicator for options trading on the Mag 7 stocks (AAPL, NVDA, MSFT, AMZN, TSLA, META, GOOGL).
+A high-performance, event-driven trading system that sells options premium (iron condors, credit spreads) on Mag 7 stocks, using Polymarket prediction market data as a timing signal to identify when event uncertainty is overpriced.
 
 **Status**: Phase 1 (Local Simulation) | **Stack**: C++20 + Python 3.10 + PostgreSQL + TimescaleDB
 
 ## Overview
 
-Unlike institutional HFT systems, PolyQuant is designed for retail quants: it uses professional-grade infrastructure to identify sentiment-driven IV mispricing before broader market participants react.
+PolyQuant harvests the Volatility Risk Premium (VRP) — the well-documented tendency for implied volatility to exceed realized volatility — with a Polymarket timing overlay. When Polymarket shows high certainty about an event outcome but options IV remains elevated, we sell premium and collect theta decay as IV crushes post-event.
 
-**Alpha Hypothesis**: Retail traders lack access to real-time sentiment aggregation from prediction markets. By synthesizing Polymarket probability shifts with options greeks and technical indicators, PolyQuant captures mispricing opportunities.
+**Alpha Hypothesis**: Structural VRP provides ~8-10% annualized edge. Polymarket timing adds ~4-8% by filtering entries to moments when the crowd is confident but IV hasn't adjusted. Target: 12-18% annualized, Sharpe ~0.8.
 
 ### Key Features
 
 - **Low-Latency Core**: C++20 event loop with <50ms tick-to-trade latency
-- **ML-Powered Signals**: XGBoost model with automatic retraining (nightly)
+- **Rule-Based Premium Selling Signals**: IV percentile + Polymarket certainty + divergence filters
 - **Comprehensive Risk Management**: Position limits, daily loss stops, graceful kill switch
 - **Production Ready**: TimescaleDB storage, Prometheus metrics, Docker deployment
 
@@ -88,19 +88,18 @@ polyquant/
 **Quick Summary**:
 - ✅ Live Polymarket data flowing
 - ✅ 14/14 tests passing
-- ✅ Signal generation working
-- 🔄 **Next: QuantConnect backtesting** (see [quantconnect/](quantconnect/))
+- ✅ Signal generation working (old call-buying logic, pending rewrite)
+- 🔄 **Next: VRP premium selling backtest** (see [quantconnect/](quantconnect/))
+- ⚠️ StrategyEngine rewrite needed for premium selling
 - ⚠️ Risk Manager needed (after backtest validation)
-- ⚠️ IBKR paper account required
 
 ---
 
 ## Backtesting
 
-**Recommended Approach**: Use [QuantConnect](quantconnect/) platform
+**Recommended Approach**: Use [QuantConnect](quantconnect/) platform for VRP premium selling backtest
+- Iron condors and credit spreads on Mag 7 stocks
 - Free tier includes options + sentiment data
-- Unlimited backtests on institutional-grade historical data
-- No data collection/storage needed
 - See [quantconnect/README.md](quantconnect/README.md) for setup
 
 **Alternative**: Build custom infrastructure with [docs/BACKTESTING.md](docs/BACKTESTING.md) (for advanced users)
@@ -136,8 +135,8 @@ polyquant/
 | Layer | Technology | Purpose |
 |-------|-----------|---------|
 | **Execution** | C++20 (GCC/Clang) | Low-latency event loop, pricing engine |
-| **ML Training** | Python 3.10 + XGBoost | Model training and backtesting |
-| **ML Inference** | ONNX Runtime | Bridge between Python and C++ |
+| **Backtesting** | Python 3.10 + QuantConnect | Strategy validation |
+| **ML Inference** | ONNX Runtime (Phase 2+) | Bridge between Python and C++ |
 | **Database** | PostgreSQL 15 + TimescaleDB | Time-series storage |
 | **Broker** | IBKR Gateway (Headless) | Options data + execution |
 | **Monitoring** | Prometheus + Grafana | Metrics and alerting |

@@ -1,5 +1,67 @@
 # Changelog
 
+## [Unreleased] - 2026-02-16
+
+### Changed - Strategy Pivot to VRP Premium Selling
+
+**Decision**: Pivot from "buy calls when Polymarket sentiment is high" to **VRP premium selling** (iron condors, credit spreads) with Polymarket as a timing signal.
+
+**Rationale**: Premium selling (short volatility) has a structural edge — implied volatility consistently exceeds realized volatility. Combined with Polymarket timing (sell when crowd is confident but IV is still elevated), this provides a more reliable, higher win-rate approach than directional call buying.
+
+#### Strategy Changes
+- **From**: Long options only (buy calls when bullish sentiment)
+- **To**: Sell premium via iron condors (neutral), put credit spreads (bullish), call credit spreads (bearish)
+- **Holding Period**: 7-45 days (was 1-7 days)
+- **Primary Profit Driver**: Theta decay and IV crush (was directional move)
+
+#### Updated Targets
+- **Return**: 12-18% annualized (was 20-40%)
+- **Sharpe**: > 0.8 (was > 1.0)
+- **Max Drawdown**: < 20% (was < 15%)
+- **Win Rate**: > 65% (was > 55%)
+
+#### Trade Types Added
+- Iron Condor (poly_prob 40-60%)
+- Put Credit Spread (poly_prob > 60%)
+- Call Credit Spread (poly_prob < 40%)
+
+#### Entry Criteria Updated
+- IV percentile > 50 (sell elevated premium)
+- Polymarket certainty > 70% (crowd confident)
+- Divergence > 10% (IV overpricing vs sentiment)
+- Short strike delta ~0.20, long strike delta ~0.08
+- DTE 7-45 days
+- Credit-to-width ratio > 30%
+
+#### Exit Logic Updated
+- Take profit: 50% of max credit captured
+- Stop loss: Spread value doubles (2x)
+- Post-event IV crush exit
+- 1 DTE theta burn exit
+
+#### Risk Management Updated
+- 5% per trade (based on max loss, not notional)
+- 3 positions per underlying
+- 15% total exposure
+- -2% daily halt, -4% weekly reduce, -15% kill switch
+
+### Removed
+- **SESSION_NOTES.md** — Stale session log from 2026-02-13, info already in STATUS.md and CHANGELOG.md
+- **ML Model section** from TRADING_STRATEGY.md — Replaced with rule-based approach; ML deferred to Phase 2+
+
+### Changed - Documentation Cleanup
+- **docs/TRADING_STRATEGY.md** — Full rewrite for VRP premium selling
+- **README.md** — Updated subtitle, overview, key features for premium selling
+- **STATUS.md** — Updated priorities (VRP backtest first), StrategyEngine marked as old logic
+- **CLAUDE.md** — Updated project overview and priorities
+- **docs/ARCHITECTURE.md** — Updated strategy layer descriptions for premium selling
+- **docs/PHASED_ROLLOUT.md** — Updated all phase exit criteria targets
+- **docs/index.md** — Updated status and ML model reference
+- **quantconnect/README.md** — Updated strategy description and expected results
+- **quantconnect/main.py** — Added DEPRECATED header (pending rewrite)
+
+---
+
 ## [Unreleased] - 2026-02-13
 
 ### Added - QuantConnect Backtesting Infrastructure

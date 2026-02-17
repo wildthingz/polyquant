@@ -16,7 +16,7 @@ This document describes the PolyQuant system architecture using the C4 model (Co
 
 ## Overview
 
-PolyQuant is an event-driven trading system with three primary external integrations:
+PolyQuant is an event-driven VRP premium selling system (iron condors, credit spreads) with three primary external integrations:
 - **Polymarket API**: Real-time prediction market data (WebSocket)
 - **IBKR API**: Options market data and trade execution (TCP)
 - **User**: Configuration and monitoring
@@ -131,8 +131,8 @@ graph LR
         DataAgg["<b>Market Data Aggregator</b><br/>Component<br/><br/>Map<br/>Unified MarketSnapshot"]
 
         subgraph StrategyLayer["Strategy Layer"]
-            Strategy["<b>Strategy Engine</b><br/>Component<br/><br/>Logic<br/>Mag 7 Trading Logic"]
-            Predictor["<b>Model Predictor</b><br/>Component<br/><br/>ONNX Runtime<br/>ML Inference"]
+            Strategy["<b>Strategy Engine</b><br/>Component<br/><br/>Logic<br/>VRP Premium Selling"]
+            Predictor["<b>Rule Engine</b><br/>Component<br/><br/>IV + Poly Filters<br/>Rule-based (ML Phase 2+)"]
         end
 
         Risk["<b>Risk Manager</b><br/>Component<br/><br/>Gatekeeper<br/>Position & Loss Limits"]
@@ -198,16 +198,18 @@ graph LR
 - **Lifetime**: Persistent (maintains state across events)
 
 **Strategy Engine**
-- Entry logic: Evaluates all filter conditions
-- Calls ML predictor for signal strength
-- Proposes orders to Risk Manager
+- Evaluates credit spread and iron condor opportunities
+- Uses IV percentile, Polymarket certainty, and divergence filters
+- Selects trade type based on poly_prob direction (put credit spread, call credit spread, or iron condor)
+- Proposes multi-leg spread orders to Risk Manager
 - **Execution**: Event-driven (triggered by EventBus)
+- **Current State**: Still implements old call-buying logic, pending rewrite
 
-**Model Predictor**
-- Loads ONNX model from registry at startup
-- Thread-safe inference (ONNX Runtime session per thread)
-- Input: 10-feature vector → Output: signal_strength [0, 1]
-- **Hot Reload**: Monitors file system for model updates
+**Rule Engine** (Phase 2+: ML Predictor)
+- Rule-based signal evaluation: IV percentile > 50, poly certainty > 70%, divergence > 10%
+- Short strike delta ~0.20, long strike delta ~0.08
+- Credit-to-width ratio > 0.30
+- **Phase 2+ Enhancement**: Replace with ONNX ML model for signal strength prediction
 
 #### Safety Layer
 
@@ -249,13 +251,13 @@ graph LR
    ↓
 3. DataAggregator::update_snapshot()
    ↓
-4. Strategy::evaluate_entry_conditions()
+4. Strategy::evaluate_spread_opportunity()
    ↓
-5. ModelPredictor::inference() → signal_strength
+5. RuleEngine::check_filters(iv_pct, poly_certainty, divergence)
    ↓
-6. Risk::check_pre_trade_limits()
+6. Risk::check_pre_trade_limits(spread_order)
    ↓
-7. Execution::place_limit_order()
+7. Execution::place_multi_leg_order()
    ↓
 8. IBKR::reqOrder() → TCP packet sent
    ↓

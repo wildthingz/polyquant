@@ -48,7 +48,7 @@ Progressive deployment strategy for PolyQuant across three phases: Local Simulat
 - [ ] Risk manager with pre-trade checks
 - [ ] Order executor with state machine
 - [ ] PostgreSQL TimescaleDB schema
-- [ ] XGBoost model trained on 20+ historical samples
+- [ ] Rule-based VRP signal engine (IV percentile + Polymarket certainty + divergence)
 - [ ] 80%+ unit test coverage
 
 ✅ Documentation complete:
@@ -78,26 +78,24 @@ WITH daily_returns AS (
 SELECT
     AVG(avg_return) / NULLIF(STDDEV(avg_return), 0) * SQRT(252) AS sharpe_ratio
 FROM daily_returns;
--- Required: > 1.0
+-- Required: > 0.8
 ```
 
-#### 2. Model Calibration
+#### 2. Win Rate
 
 ```sql
--- Win rate within ±10% of average signal strength
+-- Win rate > 65% (premium selling expects higher win rate, smaller wins)
 SELECT
-    AVG(signal_strength) AS avg_predicted,
-    AVG(CASE WHEN actual_outcome THEN 1.0 ELSE 0.0 END) AS actual_win_rate,
-    ABS(AVG(signal_strength) - AVG(CASE WHEN actual_outcome THEN 1.0 ELSE 0.0 END)) AS calibration_error
-FROM signals
-WHERE actual_outcome IS NOT NULL;
--- Required: calibration_error < 0.10
+    COUNT(*) FILTER (WHERE net_pnl > 0) * 100.0 / COUNT(*) AS win_rate_pct
+FROM trades
+WHERE status = 'CLOSED';
+-- Required: > 65
 ```
 
 #### 3. Risk Discipline
 
 ```sql
--- Max drawdown < 8%
+-- Max drawdown < 20%
 SELECT MIN(cumulative_pnl_pct) AS max_drawdown
 FROM (
     SELECT
@@ -106,7 +104,7 @@ FROM (
     FROM trades
     WHERE status = 'CLOSED'
 ) AS running_total;
--- Required: > -0.08
+-- Required: > -0.20
 ```
 
 #### 4. System Stability
@@ -175,8 +173,8 @@ WHERE status = 'CLOSED';
 | Milestone | Capital | Condition |
 |-----------|---------|-----------|
 | Start | $500 | Funded from personal savings |
-| +30 days | +$500 ($1,000 total) | If Sharpe > 1.2, no >-5% drawdown |
-| +60 days | +$1,000 ($2,000 total) | If cumulative return > 15%, calibration error < 12% |
+| +30 days | +$500 ($1,000 total) | If Sharpe > 1.0, no >-10% drawdown |
+| +60 days | +$1,000 ($2,000 total) | If cumulative return > 12% annualized, win rate > 65% |
 | Exit | $2,000 | Ready for Phase 3 |
 
 **Capital Withdrawal Rule**: If account drops below $400 (-20%), HALT trading and review.
@@ -201,19 +199,19 @@ WHERE status = 'CLOSED';
 #### 1. Positive Returns
 
 ```sql
--- Cumulative return > 15% over 60 days
+-- Cumulative return > 12% annualized over 60 days
 SELECT
     SUM(net_pnl) / 500.0 AS cumulative_return_pct  -- $500 initial capital
 FROM trades
 WHERE status = 'CLOSED'
   AND entry_time >= '<phase_2_start_date>';
--- Required: > 0.15
+-- Required: > 0.12 (prorated for 60 days)
 ```
 
 #### 2. Sharpe Ratio Maintained
 
 ```sql
--- Sharpe ratio > 1.2 (higher bar than Phase 1)
+-- Sharpe ratio > 1.0 (higher bar than Phase 1)
 WITH daily_returns AS (
     SELECT
         DATE(entry_time) AS trade_date,
@@ -226,7 +224,7 @@ WITH daily_returns AS (
 SELECT
     AVG(daily_return_pct) / NULLIF(STDDEV(daily_return_pct), 0) * SQRT(252) AS sharpe_ratio
 FROM daily_returns;
--- Required: > 1.2
+-- Required: > 1.0
 ```
 
 #### 3. Max Drawdown
@@ -245,16 +243,16 @@ FROM (
 -- Required: > -0.10
 ```
 
-#### 4. Model Still Calibrated
+#### 4. Win Rate Maintained
 
 ```sql
--- Calibration error < 12%
+-- Win rate > 65% (premium selling expects high win rate)
 SELECT
-    ABS(AVG(signal_strength) - AVG(CASE WHEN actual_outcome THEN 1.0 ELSE 0.0 END)) AS calibration_error
-FROM signals
-WHERE actual_outcome IS NOT NULL
-  AND created_at >= '<phase_2_start_date>';
--- Required: < 0.12
+    COUNT(*) FILTER (WHERE net_pnl > 0) * 100.0 / COUNT(*) AS win_rate_pct
+FROM trades
+WHERE status = 'CLOSED'
+  AND entry_time >= '<phase_2_start_date>';
+-- Required: > 65
 ```
 
 #### 5. Operational Uptime
@@ -329,37 +327,30 @@ echo "✅ Daily checklist complete"
   - Review all ERROR/CRITICAL logs
   - Test recovery procedures (kill Gateway, restart DB)
 
-#### Monthly Model Retraining
+#### Monthly Strategy Review
 
 ```bash
-# scripts/monthly_retrain.sh
-source ~/polyquant-venv/bin/activate
+# scripts/monthly_review.sh
 
-# 1. Export training data (last 60 days)
+# 1. Export trade results (last 60 days)
 psql -U polyquant_user -d polyquant -c "COPY (
     SELECT
-        signal_strength,
-        features,
-        actual_outcome
-    FROM signals
-    WHERE actual_outcome IS NOT NULL
-      AND created_at >= NOW() - INTERVAL '60 days'
-) TO '/tmp/training_data.csv' WITH CSV HEADER;"
+        entry_time, exit_time, trade_type,
+        credit_received, spread_width,
+        net_pnl, net_pnl_pct, exit_reason
+    FROM trades
+    WHERE status = 'CLOSED'
+      AND entry_time >= NOW() - INTERVAL '60 days'
+) TO '/tmp/trade_results.csv' WITH CSV HEADER;"
 
-# 2. Train new model
-python src/python/train_model.py \
-    --input /tmp/training_data.csv \
-    --output models/xgboost_v$(date +%Y%m%d).onnx
+# 2. Analyze performance by trade type
+python scripts/analyze_trades.py \
+    --input /tmp/trade_results.csv
 
-# 3. Validate calibration on holdout set
-python src/python/validate_model.py \
-    --model models/xgboost_v$(date +%Y%m%d).onnx \
-    --test-data /tmp/training_data.csv
+# 3. Review IV percentile and divergence thresholds
+# Adjust if win rate or Sharpe degrading
 
-# 4. Hot-reload (engine watches file system)
-cp models/xgboost_v$(date +%Y%m%d).onnx models/xgboost_v1.0.0.onnx
-
-echo "✅ Model retrained and deployed"
+echo "✅ Monthly review complete"
 ```
 
 ### Phase 2 Deliverables
@@ -376,8 +367,8 @@ echo "✅ Model retrained and deployed"
 **If ALL exit criteria pass**: Proceed to Phase 3
 **If ANY criteria fail**:
 1. If drawdown > -20%: HALT, withdraw capital, full post-mortem
-2. If Sharpe < 1.0: Extend Phase 2 by 30 days, lower capital to $500
-3. If calibration error > 15%: Retrain model, restart Phase 2 timer
+2. If Sharpe < 0.8: Extend Phase 2 by 30 days, lower capital to $500
+3. If win rate < 55%: Review entry criteria, tighten filters, restart Phase 2 timer
 
 ---
 
@@ -441,10 +432,10 @@ echo "✅ Model retrained and deployed"
 | Metric | Target | Alert Threshold |
 |--------|--------|-----------------|
 | **Uptime** | 99.9% | <99.5% in 7-day window |
-| **Sharpe Ratio** | >1.5 | <1.2 for 30 days |
-| **Max Drawdown** | <12% | >-10% from peak |
+| **Sharpe Ratio** | >1.0 | <0.8 for 30 days |
+| **Max Drawdown** | <20% | >-15% from peak |
 | **Order Latency (p95)** | <50ms | >100ms for 1 hour |
-| **Model Calibration** | <10% error | >15% error for 20 trades |
+| **Win Rate** | >65% | <55% for 50 trades |
 | **Daily Loss Circuit** | -2% | Triggered |
 
 ### Capital Scaling Plan
@@ -452,7 +443,7 @@ echo "✅ Model retrained and deployed"
 | Milestone | Capital | Condition |
 |-----------|---------|-----------|
 | Start | $2,000 | Phase 2 graduation |
-| +90 days | $5,000 | If Sharpe > 1.5, returns > 20%, drawdown < 10% |
+| +90 days | $5,000 | If Sharpe > 1.0, returns > 12% annualized, drawdown < 15% |
 | +180 days | $10,000 | If all targets maintained, no major incidents |
 | Ongoing | Gradual | Reinvest 50% of profits, withdraw 50% |
 
@@ -476,17 +467,17 @@ echo "✅ Model retrained and deployed"
 ### Phase 3 Success Metrics
 
 **After 1 Year**:
-- Cumulative return > 30% (after fees)
-- Sharpe ratio > 1.5
-- Max drawdown < 15%
+- Cumulative return > 15% (after fees)
+- Sharpe ratio > 1.0
+- Max drawdown < 20%
+- Win rate > 65%
 - Zero unrecoverable incidents
-- Model calibration error < 10%
 - 99.9%+ uptime
 
 **Long-Term Vision** (2-3 years):
-- Expand beyond Mag 7 (Russell 2000, sector ETFs)
-- Add short strategies (sell options when IV overpriced)
-- Build portfolio of uncorrelated sub-strategies
+- Expand premium selling across sectors (beyond Mag 7 to Russell 2000, sector ETFs)
+- Add ML model for improved signal quality (Phase 2+ enhancement)
+- Build portfolio of uncorrelated VRP sub-strategies
 - Open-source anonymized framework (after alpha decays)
 
 ---

@@ -1,15 +1,14 @@
+# DEPRECATED: This implements the old call-buying strategy.
+# See docs/TRADING_STRATEGY.md for the new VRP premium selling approach.
+# This file will be rewritten to implement iron condors and credit spreads
+# with Polymarket timing as the next priority task.
 """
 PolyQuant Strategy - QuantConnect Implementation
 
-Sentiment-driven options trading using Brain Sentiment + IV mean reversion.
-Since Polymarket data isn't available, we use Brain Sentiment Indicator as proxy.
+DEPRECATED: Old call-buying strategy. Pending rewrite for VRP premium selling
+(iron condors, credit spreads) with Polymarket timing overlay.
 
-Strategy:
-- Monitor MAG7 stocks (AAPL, MSFT, NVDA, AMZN, TSLA, META, GOOGL)
-- Buy options when sentiment diverges from IV (sentiment high, IV elevated)
-- Exit at +50% profit, -30% stop loss, or 1 DTE
-
-Target: Sharpe > 1.0, Max DD < 15%, Win Rate > 55%
+New target: Sharpe > 0.8, Max DD < 20%, Win Rate > 65%, Return 12-18%
 """
 
 from AlgorithmImports import *
